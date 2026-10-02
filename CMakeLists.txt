@@ -10,24 +10,44 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Boost REQUIRED)
+find_package(OpenSSL REQUIRED)
+
+
+# =========================
+# API Gateway
+# =========================
 
 add_executable(api_gateway
     src/main.cpp
+    src/rate_limiter.cpp
+    src/redis_rate_limit_store.cpp
+)
+
+target_include_directories(api_gateway
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_link_libraries(api_gateway
     PRIVATE
     Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
     ws2_32
     mswsock
 )
 
 
-# -------------------------
+# =========================
 # Tests
-# -------------------------
+# =========================
 
 enable_testing()
+
+
+# -------------------------
+# Load Balancer Test
+# -------------------------
 
 add_executable(load_balancer_test
     tests/load_balancer_test.cpp
@@ -41,4 +61,136 @@ target_include_directories(load_balancer_test
 add_test(
     NAME LoadBalancerTest
     COMMAND load_balancer_test
+)
+
+
+# -------------------------
+# In-Memory Rate Limiter Test
+# -------------------------
+
+add_executable(rate_limiter_test
+    tests/rate_limiter_test.cpp
+    src/rate_limiter.cpp
+    src/in_memory_rate_limit_store.cpp
+)
+
+target_include_directories(rate_limiter_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+add_test(
+    NAME RateLimiterTest
+    COMMAND rate_limiter_test
+)
+
+
+# -------------------------
+# In-Memory Rate Limiter
+# Concurrency Test
+# -------------------------
+
+add_executable(rate_limiter_concurrency_test
+    tests/rate_limiter_concurrency_test.cpp
+    src/rate_limiter.cpp
+    src/in_memory_rate_limit_store.cpp
+)
+
+target_include_directories(rate_limiter_concurrency_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+add_test(
+    NAME RateLimiterConcurrencyTest
+    COMMAND rate_limiter_concurrency_test
+)
+
+
+# -------------------------
+# Redis Connection Test
+# -------------------------
+
+add_executable(redis_connection_test
+    tests/redis_connection_test.cpp
+)
+
+target_include_directories(redis_connection_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(redis_connection_test
+    PRIVATE
+    Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ws2_32
+    mswsock
+)
+
+add_test(
+    NAME RedisConnectionTest
+    COMMAND redis_connection_test
+)
+
+
+# -------------------------
+# Redis Rate Limit Store Test
+# -------------------------
+
+add_executable(redis_rate_limit_store_test
+    tests/redis_rate_limit_store_test.cpp
+    src/rate_limiter.cpp
+    src/redis_rate_limit_store.cpp
+)
+
+target_include_directories(redis_rate_limit_store_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(redis_rate_limit_store_test
+    PRIVATE
+    Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ws2_32
+    mswsock
+)
+
+add_test(
+    NAME RedisRateLimitStoreTest
+    COMMAND redis_rate_limit_store_test
+)
+
+
+# -------------------------
+# Redis Rate Limiter
+# Concurrency Test
+# -------------------------
+
+add_executable(redis_rate_limit_concurrency_test
+    tests/redis_rate_limit_concurrency_test.cpp
+    src/rate_limiter.cpp
+    src/redis_rate_limit_store.cpp
+)
+
+target_include_directories(redis_rate_limit_concurrency_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(redis_rate_limit_concurrency_test
+    PRIVATE
+    Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ws2_32
+    mswsock
+)
+
+add_test(
+    NAME RedisRateLimitConcurrencyTest
+    COMMAND redis_rate_limit_concurrency_test
 )
