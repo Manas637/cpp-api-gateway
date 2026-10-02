@@ -6,6 +6,9 @@
 #include <boost/beast.hpp>
 #include <boost/beast/http.hpp>
 
+#include "load_balancer.hpp"
+#include "health_checker.hpp"
+
 namespace asio = boost::asio;
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -26,11 +29,18 @@ private:
     beast::flat_buffer backend_buffer_;
     http::response<http::string_body> backend_response_;
 
+    std::shared_ptr<LoadBalancer> load_balancer_;
+
+    Backend *selected_backend_ = nullptr;
+
 public:
-    explicit Session(tcp::socket socket)
+    Session(
+        tcp::socket socket,
+        std::shared_ptr<LoadBalancer> load_balancer)
         : socket_(std::move(socket)),
           resolver_(socket_.get_executor()),
-          backend_socket_(socket_.get_executor()) {}
+          backend_socket_(socket_.get_executor()),
+          load_balancer_(std::move(load_balancer)) {}
 
     void start()
     {
@@ -71,12 +81,20 @@ private:
 
     void connect_to_backend()
     {
+        selected_backend_ = &load_balancer_->next();
+
+        std::cout
+            << "Selected backend: "
+            << selected_backend_->host
+            << ":"
+            << selected_backend_->port
+            << '\n';
 
         auto self = shared_from_this();
 
         resolver_.async_resolve(
-            "localhost",
-            "9001",
+            selected_backend_->host,
+            std::to_string(selected_backend_->port),
 
             [self](
                 beast::error_code ec,
@@ -84,7 +102,6 @@ private:
             {
                 if (ec)
                 {
-
                     std::cerr
                         << "Backend resolve error: "
                         << ec.message()
@@ -103,7 +120,6 @@ private:
                     {
                         if (ec)
                         {
-
                             std::cerr
                                 << "Backend connection error: "
                                 << ec.message()
@@ -215,15 +231,19 @@ class Server
 private:
     asio::io_context &io_context_;
     tcp::acceptor acceptor_;
+    std::shared_ptr<LoadBalancer> load_balancer_;
 
 public:
     Server(
         asio::io_context &io_context,
-        unsigned short port)
+        unsigned short port,
+        std::shared_ptr<LoadBalancer> load_balancer
+    )
         : io_context_(io_context),
           acceptor_(
               io_context,
-              tcp::endpoint(tcp::v4(), port))
+              tcp::endpoint(tcp::v4(), port)),
+          load_balancer_(std::move(load_balancer))
     {
 
         accept();
@@ -243,8 +263,9 @@ private:
                         << "Client connected\n";
 
                     std::make_shared<Session>(
-                        std::move(socket))
-                        ->start();
+                        std::move(socket),
+                        load_balancer_
+                    )->start();
                 }
                 else
                 {
@@ -268,7 +289,21 @@ int main()
 
         asio::io_context io_context;
 
-        Server server(io_context, 8080);
+        auto load_balancer =
+            std::make_shared<LoadBalancer>(
+                std::vector<Backend>{
+                    Backend("127.0.0.1", 9001),
+                    Backend("127.0.0.1", 9002),
+                    Backend("127.0.0.1", 9003)});
+
+        auto health_checker =
+            std::make_shared<HealthChecker>(
+                io_context,
+                load_balancer);
+
+        health_checker->start();
+
+        Server server(io_context, 8080, load_balancer);
 
         std::cout
             << "Async server listening on port 8080...\n";

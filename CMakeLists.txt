@@ -21,3 +21,24 @@ target_link_libraries(api_gateway
     ws2_32
     mswsock
 )
+
+
+# -------------------------
+# Tests
+# -------------------------
+
+enable_testing()
+
+add_executable(load_balancer_test
+    tests/load_balancer_test.cpp
+)
+
+target_include_directories(load_balancer_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+add_test(
+    NAME LoadBalancerTest
+    COMMAND load_balancer_test
+)
