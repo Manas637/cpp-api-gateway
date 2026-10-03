@@ -212,3 +212,54 @@ target_link_libraries(redis_rate_limit_benchmark
     ws2_32
     mswsock
 )
+
+add_executable(circuit_breaker_test
+    tests/circuit_breaker_test.cpp
+)
+
+target_include_directories(circuit_breaker_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+add_test(
+    NAME CircuitBreakerTest
+    COMMAND circuit_breaker_test
+)
+
+add_executable(load_balancer_circuit_breaker_test
+    tests/load_balancer_circuit_breaker_test.cpp
+)
+
+target_include_directories(load_balancer_circuit_breaker_test
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+add_test(
+    NAME LoadBalancerCircuitBreakerTest
+    COMMAND load_balancer_circuit_breaker_test
+)
+
+add_executable(gateway_integration_test
+    tests/gateway_integration_test.cpp
+    src/rate_limiter.cpp
+    src/in_memory_rate_limit_store.cpp
+)
+
+target_include_directories(gateway_integration_test
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(gateway_integration_test
+    PRIVATE
+    Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ws2_32
+    mswsock
+)
+
+add_test(
+    NAME GatewayIntegrationTest
+    COMMAND gateway_integration_test
+)

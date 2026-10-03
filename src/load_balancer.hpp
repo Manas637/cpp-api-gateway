@@ -31,7 +31,8 @@ public:
             current_index_ =
                 (current_index_ + 1) % count;
 
-            if (backend.healthy)
+            if (backend.healthy &&
+                backend.circuit_breaker.allow_request())
             {
                 return backend;
             }
