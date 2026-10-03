@@ -21,6 +21,7 @@ add_executable(api_gateway
     src/main.cpp
     src/rate_limiter.cpp
     src/redis_rate_limit_store.cpp
+    src/metrics.cpp
 )
 
 target_include_directories(api_gateway
@@ -244,6 +245,7 @@ add_executable(gateway_integration_test
     tests/gateway_integration_test.cpp
     src/rate_limiter.cpp
     src/in_memory_rate_limit_store.cpp
+    src/metrics.cpp
 )
 
 target_include_directories(gateway_integration_test
@@ -262,4 +264,51 @@ target_link_libraries(gateway_integration_test
 add_test(
     NAME GatewayIntegrationTest
     COMMAND gateway_integration_test
+)
+
+# -------------------------
+# Rate Limit Metrics
+# Integration Test
+# -------------------------
+
+add_executable(rate_limit_metrics_integration_test
+    tests/rate_limit_metrics_integration_test.cpp
+    src/rate_limiter.cpp
+    src/in_memory_rate_limit_store.cpp
+    src/metrics.cpp
+)
+
+target_include_directories(rate_limit_metrics_integration_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(rate_limit_metrics_integration_test
+    PRIVATE
+    Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ws2_32
+    mswsock
+)
+
+add_test(
+    NAME RateLimitMetricsIntegrationTest
+    COMMAND rate_limit_metrics_integration_test
+)
+
+add_executable(metrics_test
+    tests/metrics_test.cpp
+    src/metrics.cpp
+)
+
+target_include_directories(
+    metrics_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+add_test(
+    NAME MetricsTest
+    COMMAND metrics_test
 )

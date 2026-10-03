@@ -9,6 +9,7 @@
 #include "rate_limiter.hpp"
 #include "redis_rate_limit_store.hpp"
 #include "server.hpp"
+#include "metrics.hpp"
 
 namespace asio = boost::asio;
 
@@ -19,6 +20,8 @@ int main()
         asio::io_context io_context;
 
         constexpr bool rate_limiting_enabled = true;
+
+        auto metrics = std::make_shared<Metrics>();
 
         GatewayConfig config{
             .port = 8080,
@@ -55,6 +58,7 @@ int main()
             config,
             load_balancer,
             rate_limiter,
+            metrics,
             rate_limiting_enabled);
 
         std::cout

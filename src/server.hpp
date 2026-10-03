@@ -12,6 +12,7 @@
 #include "gateway_config.hpp"
 #include "load_balancer.hpp"
 #include "rate_limiter.hpp"
+#include "metrics.hpp"
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -45,17 +46,21 @@ private:
 
     std::string client_id_;
 
+    std::shared_ptr<Metrics> metrics_;
+
 public:
     Session(
         tcp::socket socket,
         std::shared_ptr<LoadBalancer> load_balancer,
         std::shared_ptr<RateLimiter> rate_limiter,
+        std::shared_ptr<Metrics> metrics,
         bool rate_limiting_enabled)
         : socket_(std::move(socket)),
           resolver_(socket_.get_executor()),
           backend_socket_(socket_.get_executor()),
           load_balancer_(std::move(load_balancer)),
           rate_limiter_(std::move(rate_limiter)),
+          metrics_(std::move(metrics)),
           rate_limiting_enabled_(rate_limiting_enabled)
     {
     }
@@ -99,6 +104,8 @@ private:
                     return;
                 }
 
+                self->metrics_->record_response(503);
+
                 self->request_ = {};
                 self->read_request();
             });
@@ -134,6 +141,8 @@ private:
 
                     return;
                 }
+
+                self->metrics_->record_request();
 
                 beast::error_code endpoint_ec;
 
@@ -174,10 +183,12 @@ private:
             {
                 if (!allowed)
                 {
+                    self->metrics_->record_rate_limit_rejected();
                     self->send_rate_limit_response();
                     return;
                 }
 
+                self->metrics_->record_rate_limit_allowed();
                 self->connect_to_backend();
             });
     }
@@ -217,6 +228,8 @@ private:
                     return;
                 }
 
+                self->metrics_->record_response(429);
+
                 beast::error_code shutdown_ec;
 
                 self->socket_.shutdown(
@@ -235,8 +248,25 @@ private:
 
         try
         {
+            Backend *previous_backend = selected_backend_;
+
+            CircuitBreaker::Transition transition =
+                CircuitBreaker::Transition::NONE;
+
             selected_backend_ =
-                &load_balancer_->next();
+                &load_balancer_->next(&transition);
+
+            if (transition ==
+                CircuitBreaker::Transition::HALF_OPENED)
+            {
+                metrics_->record_circuit_half_open();
+            }
+
+            if (previous_backend != nullptr &&
+                previous_backend != selected_backend_)
+            {
+                metrics_->record_failover();
+            }
         }
         catch (const std::runtime_error &e)
         {
@@ -266,9 +296,18 @@ private:
                         << ec.message()
                         << '\n';
 
-                    self->selected_backend_
-                        ->circuit_breaker
-                        .record_failure();
+                    self->metrics_->record_backend_failure();
+
+                    auto transition =
+                        self->selected_backend_
+                            ->circuit_breaker
+                            .record_failure();
+
+                    if (transition ==
+                        CircuitBreaker::Transition::OPENED)
+                    {
+                        self->metrics_->record_circuit_open();
+                    }
 
                     self->backend_connected_ = false;
                     self->connect_to_backend();
@@ -291,9 +330,18 @@ private:
                                 << ec.message()
                                 << '\n';
 
-                            self->selected_backend_
-                                ->circuit_breaker
-                                .record_failure();
+                            self->metrics_->record_backend_failure();
+
+                            auto transition =
+                                self->selected_backend_
+                                    ->circuit_breaker
+                                    .record_failure();
+
+                            if (transition ==
+                                CircuitBreaker::Transition::OPENED)
+                            {
+                                self->metrics_->record_circuit_open();
+                            }
 
                             beast::error_code close_ec;
 
@@ -318,6 +366,8 @@ private:
     {
         auto self = shared_from_this();
 
+        self->metrics_->record_backend_request();
+
         http::async_write(
             backend_socket_,
             request_,
@@ -333,9 +383,18 @@ private:
                         << ec.message()
                         << '\n';
 
-                    self->selected_backend_
-                        ->circuit_breaker
-                        .record_failure();
+                    self->metrics_->record_backend_failure();
+
+                    auto transition =
+                        self->selected_backend_
+                            ->circuit_breaker
+                            .record_failure();
+
+                    if (transition ==
+                        CircuitBreaker::Transition::OPENED)
+                    {
+                        self->metrics_->record_circuit_open();
+                    }
 
                     beast::error_code close_ec;
 
@@ -373,9 +432,18 @@ private:
                         << ec.message()
                         << '\n';
 
-                    self->selected_backend_
-                        ->circuit_breaker
-                        .record_failure();
+                    self->metrics_->record_backend_failure();
+
+                    auto transition =
+                        self->selected_backend_
+                            ->circuit_breaker
+                            .record_failure();
+
+                    if (transition ==
+                        CircuitBreaker::Transition::OPENED)
+                    {
+                        self->metrics_->record_circuit_open();
+                    }
 
                     beast::error_code close_ec;
 
@@ -389,9 +457,18 @@ private:
                     return;
                 }
 
-                self->selected_backend_
-                    ->circuit_breaker
-                    .record_success();
+                self->metrics_->record_backend_success();
+
+                auto transition =
+                    self->selected_backend_
+                        ->circuit_breaker
+                        .record_success();
+
+                if (transition ==
+                    CircuitBreaker::Transition::RECOVERED)
+                {
+                    self->metrics_->record_circuit_recovery();
+                }
 
                 self->send_to_client();
             });
@@ -422,6 +499,9 @@ private:
                     return;
                 }
 
+                self->metrics_->record_response(
+                    self->backend_response_.result_int());
+
                 self->request_ = {};
                 self->backend_response_ = {};
 
@@ -440,12 +520,15 @@ private:
     std::shared_ptr<RateLimiter> rate_limiter_;
     bool rate_limiting_enabled_;
 
+    std::shared_ptr<Metrics> metrics_;
+
 public:
     Server(
         asio::io_context &io_context,
         const GatewayConfig &config,
         std::shared_ptr<LoadBalancer> load_balancer,
         std::shared_ptr<RateLimiter> rate_limiter,
+        std::shared_ptr<Metrics> metrics,
         bool rate_limiting_enabled)
         : io_context_(io_context),
           acceptor_(
@@ -453,6 +536,7 @@ public:
               tcp::endpoint(tcp::v4(), config.port)),
           load_balancer_(std::move(load_balancer)),
           rate_limiter_(std::move(rate_limiter)),
+          metrics_(std::move(metrics)),
           rate_limiting_enabled_(rate_limiting_enabled)
     {
         accept();
@@ -472,6 +556,7 @@ private:
                         std::move(socket),
                         load_balancer_,
                         rate_limiter_,
+                        metrics_,
                         rate_limiting_enabled_)
                         ->start();
                 }

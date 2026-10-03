@@ -16,6 +16,14 @@ public:
         HALF_OPEN
     };
 
+    enum class Transition
+    {
+        NONE,
+        OPENED,
+        HALF_OPENED,
+        RECOVERED
+    };
+
     explicit CircuitBreaker(
         std::size_t failure_threshold,
         std::chrono::milliseconds open_duration)
@@ -24,8 +32,15 @@ public:
     {
     }
 
-    bool allow_request(TimePoint now = Clock::now())
+    bool allow_request(
+        TimePoint now = Clock::now(),
+        Transition *transition = nullptr)
     {
+        if (transition != nullptr)
+        {
+            *transition = Transition::NONE;
+        }
+
         if (state_ == State::CLOSED)
         {
             return true;
@@ -41,6 +56,11 @@ public:
             state_ = State::HALF_OPEN;
             half_open_request_in_flight_ = true;
 
+            if (transition != nullptr)
+            {
+                *transition = Transition::HALF_OPENED;
+            }
+
             return true;
         }
 
@@ -49,14 +69,26 @@ public:
         return false;
     }
 
-    void record_success()
+    Transition record_success()
     {
+        if (state_ == State::HALF_OPEN)
+        {
+            state_ = State::CLOSED;
+            failure_count_ = 0;
+            half_open_request_in_flight_ = false;
+
+            return Transition::RECOVERED;
+        }
+
         state_ = State::CLOSED;
         failure_count_ = 0;
         half_open_request_in_flight_ = false;
+
+        return Transition::NONE;
     }
 
-    void record_failure(TimePoint now = Clock::now())
+    Transition record_failure(
+        TimePoint now = Clock::now())
     {
         if (state_ == State::HALF_OPEN)
         {
@@ -64,12 +96,12 @@ public:
             opened_at_ = now;
             half_open_request_in_flight_ = false;
 
-            return;
+            return Transition::OPENED;
         }
 
         if (state_ != State::CLOSED)
         {
-            return;
+            return Transition::NONE;
         }
 
         ++failure_count_;
@@ -78,7 +110,11 @@ public:
         {
             state_ = State::OPEN;
             opened_at_ = now;
+
+            return Transition::OPENED;
         }
+
+        return Transition::NONE;
     }
 
     State state() const

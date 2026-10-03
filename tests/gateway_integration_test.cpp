@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <cstdint>
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -16,6 +17,7 @@
 #include "load_balancer.hpp"
 #include "rate_limiter.hpp"
 #include "server.hpp"
+#include "metrics.hpp"
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -222,6 +224,27 @@ std::string send_request(
     return response.body();
 }
 
+void assert_metric(
+    const Metrics &metrics,
+    uint64_t requests,
+    uint64_t backend_requests,
+    uint64_t backend_successes,
+    uint64_t backend_failures,
+    uint64_t failovers,
+    uint64_t circuit_opens,
+    uint64_t circuit_half_opens,
+    uint64_t circuit_recoveries)
+{
+    assert(metrics.requests_total() == requests);
+    assert(metrics.backend_requests_total() == backend_requests);
+    assert(metrics.backend_successes_total() == backend_successes);
+    assert(metrics.backend_failures_total() == backend_failures);
+    assert(metrics.failovers_total() == failovers);
+    assert(metrics.circuit_opens_total() == circuit_opens);
+    assert(metrics.circuit_half_opens_total() == circuit_half_opens);
+    assert(metrics.circuit_recoveries_total() == circuit_recoveries);
+}
+
 // ============================================================
 // Main Integration Test
 // ============================================================
@@ -279,6 +302,8 @@ int main()
         std::make_shared<LoadBalancer>(
             std::move(backends));
 
+    auto metrics = std::make_shared<Metrics>();
+
     // ========================================================
     // Rate Limiter
     // ========================================================
@@ -327,6 +352,7 @@ int main()
         config,
         load_balancer,
         rate_limiter,
+        metrics,
         false);
 
     // Give the server/backend acceptors time to start.
@@ -355,6 +381,17 @@ int main()
 
         assert(response == "backend B");
 
+        assert_metric(
+            *metrics,
+            2,  // requests
+            2,  // backend requests
+            2,  // backend successes
+            0,  // backend failures
+            0,  // failovers
+            0,  // circuit opens
+            0,  // circuit half-opens
+            0); // recoveries
+
         std::cout
             << "[PASS] round-robin routing\n";
     }
@@ -372,6 +409,17 @@ int main()
 
         // A fails, gateway retries B.
         assert(response == "backend B");
+
+        assert_metric(
+            *metrics,
+            3,
+            4,
+            3,
+            1,
+            1,
+            0,
+            0,
+            0);
 
         std::cout
             << "[PASS] failover after backend failure\n";
@@ -400,6 +448,17 @@ int main()
         assert(
             backend_a_state.circuit_breaker.state() == CircuitBreaker::State::OPEN);
 
+        assert_metric(
+            *metrics,
+            8,
+            13,
+            8,
+            5,
+            5,
+            1,
+            0,
+            0);
+
         std::cout
             << "[PASS] circuit opens after repeated failures\n";
     }
@@ -421,6 +480,17 @@ int main()
 
         assert(
             backend_a_state.circuit_breaker.state() == CircuitBreaker::State::OPEN);
+
+        assert_metric(
+            *metrics,
+            9,
+            14,
+            9,
+            5,
+            5,
+            1,
+            0,
+            0);
 
         std::cout
             << "[PASS] OPEN backend is skipped\n";
@@ -469,6 +539,17 @@ int main()
         assert(
             backend_a_state.circuit_breaker.failure_count() == 0);
 
+        assert_metric(
+            *metrics,
+            10,
+            15,
+            10,
+            5,
+            5,
+            1,
+            1,
+            1);
+
         std::cout
             << "[PASS] HALF_OPEN probe successfully recovers backend\n";
     }
@@ -492,6 +573,17 @@ int main()
 
         assert(
             backend_a_state.circuit_breaker.state() == CircuitBreaker::State::CLOSED);
+
+        assert_metric(
+            *metrics,
+            11,
+            16,
+            11,
+            5,
+            5,
+            1,
+            1,
+            1);
 
         std::cout
             << "[PASS] recovered backend participates normally\n";
