@@ -3,8 +3,9 @@
 #include "redis_rate_limit_store.hpp"
 #include <iostream>
 #include <memory>
-#include <sstream>
 #include <string>
+#include <chrono>
+#include <atomic>
 
 namespace
 {
@@ -95,7 +96,8 @@ RedisRateLimitStore::RedisRateLimitStore(
         config,
         [this](boost::system::error_code ec)
         {
-            if (ec)
+            if (ec &&
+                ec != boost::asio::error::operation_aborted)
             {
                 std::cerr
                     << "Redis connection error: "
@@ -131,30 +133,46 @@ void RedisRateLimitStore::async_consume(
     connection_.async_exec(
         *request,
         *response,
-        [request,
-         response,
-         handler = std::move(handler)](boost::system::error_code ec,
-                                       std::size_t)
-        {
-            if (ec)
+        boost::asio::cancel_after(
+            std::chrono::seconds(5),
+            [request,
+             response,
+             handler = std::move(handler)](
+                boost::system::error_code ec,
+                std::size_t)
             {
-                std::cerr
-                    << "Redis rate limit error: "
-                    << ec.message()
-                    << '\n';
+                if (ec)
+                {
+                    static std::atomic<int> error_count{0};
 
-                handler(false);
-                return;
-            }
+                    const int current =
+                        error_count.fetch_add(
+                            1,
+                            std::memory_order_relaxed) +
+                        1;
 
-            const int result =
-                std::get<0>(*response).value();
+                    if (current <= 20)
+                    {
+                        std::cerr
+                            << "Redis error #"
+                            << current
+                            << ": "
+                            << ec.message()
+                            << '\n';
+                    }
 
-            std::cout
-                << "Redis EVAL result: "
-                << result
-                << '\n';
+                    handler(false);
+                    return;
+                }
 
-            handler(result == 1);
-        });
+                const int result =
+                    std::get<0>(*response).value();
+
+                handler(result == 1);
+            }));
+}
+
+void RedisRateLimitStore::shutdown()
+{
+    connection_.cancel();
 }

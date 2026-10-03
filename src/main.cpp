@@ -36,8 +36,10 @@ private:
 
     std::shared_ptr<LoadBalancer> load_balancer_;
     std::shared_ptr<RateLimiter> rate_limiter_;
+    bool rate_limiting_enabled_;
 
     Backend *selected_backend_ = nullptr;
+    bool backend_connected_ = false;
 
     std::string client_id_;
 
@@ -45,17 +47,20 @@ public:
     Session(
         tcp::socket socket,
         std::shared_ptr<LoadBalancer> load_balancer,
-        std::shared_ptr<RateLimiter> rate_limiter)
+        std::shared_ptr<RateLimiter> rate_limiter,
+        bool rate_limiting_enabled)
         : socket_(std::move(socket)),
           resolver_(socket_.get_executor()),
           backend_socket_(socket_.get_executor()),
           load_balancer_(std::move(load_balancer)),
-          rate_limiter_(std::move(rate_limiter))
+          rate_limiter_(std::move(rate_limiter)),
+          rate_limiting_enabled_(rate_limiting_enabled)
     {
     }
 
     void start()
     {
+        selected_backend_ = &load_balancer_->next();
         read_request();
     }
 
@@ -74,6 +79,17 @@ private:
             request_,
             [self](beast::error_code ec, std::size_t bytes)
             {
+                if (ec == http::error::end_of_stream)
+                {
+                    beast::error_code shutdown_ec;
+
+                    self->socket_.shutdown(
+                        tcp::socket::shutdown_both,
+                        shutdown_ec);
+
+                    return;
+                }
+
                 if (ec)
                 {
                     std::cerr
@@ -83,13 +99,6 @@ private:
 
                     return;
                 }
-
-                std::cout
-                    << "Received: "
-                    << self->request_.method_string()
-                    << " "
-                    << self->request_.target()
-                    << '\n';
 
                 // Identify the client by IP address.
                 beast::error_code endpoint_ec;
@@ -110,7 +119,14 @@ private:
                 self->client_id_ =
                     endpoint.address().to_string();
 
-                self->check_rate_limit();
+                if (self->rate_limiting_enabled_)
+                {
+                    self->check_rate_limit();
+                }
+                else
+                {
+                    self->connect_to_backend();
+                }
             });
     }
 
@@ -122,10 +138,6 @@ private:
     {
         auto self = shared_from_this();
 
-        std::cout
-            << "Checking rate limit for client: "
-            << client_id_
-            << '\n';
 
         rate_limiter_->async_allow(
             client_id_,
@@ -133,19 +145,9 @@ private:
             {
                 if (!allowed)
                 {
-                    std::cout
-                        << "Rate limit exceeded for client: "
-                        << self->client_id_
-                        << '\n';
-
                     self->send_rate_limit_response();
                     return;
                 }
-
-                std::cout
-                    << "Rate limit allowed for client: "
-                    << self->client_id_
-                    << '\n';
 
                 self->connect_to_backend();
             });
@@ -200,15 +202,11 @@ private:
 
     void connect_to_backend()
     {
-        selected_backend_ =
-            &load_balancer_->next();
-
-        std::cout
-            << "Selected backend: "
-            << selected_backend_->host
-            << ":"
-            << selected_backend_->port
-            << '\n';
+        if (backend_connected_)
+        {
+            send_to_backend();
+            return;
+        }
 
         auto self = shared_from_this();
 
@@ -248,8 +246,7 @@ private:
                             return;
                         }
 
-                        std::cout
-                            << "Connected to backend\n";
+                        self->backend_connected_ = true;
 
                         self->send_to_backend();
                     });
@@ -325,6 +322,8 @@ private:
     {
         auto self = shared_from_this();
 
+        backend_response_.version(request_.version());
+
         http::async_write(
             socket_,
             backend_response_,
@@ -343,11 +342,12 @@ private:
                     return;
                 }
 
-                beast::error_code shutdown_ec;
+                // Response has been sent successfully.
+                // Wait for another request on the same client connection.
+                self->request_ = {};
+                self->backend_response_ = {};
 
-                self->socket_.shutdown(
-                    tcp::socket::shutdown_send,
-                    shutdown_ec);
+                self->read_request();
             });
     }
 };
@@ -360,19 +360,22 @@ private:
 
     std::shared_ptr<LoadBalancer> load_balancer_;
     std::shared_ptr<RateLimiter> rate_limiter_;
+    bool rate_limiting_enabled_;
 
 public:
     Server(
         asio::io_context &io_context,
         unsigned short port,
         std::shared_ptr<LoadBalancer> load_balancer,
-        std::shared_ptr<RateLimiter> rate_limiter)
+        std::shared_ptr<RateLimiter> rate_limiter,
+        bool rate_limiting_enabled)
         : io_context_(io_context),
           acceptor_(
               io_context,
               tcp::endpoint(tcp::v4(), port)),
           load_balancer_(std::move(load_balancer)),
-          rate_limiter_(std::move(rate_limiter))
+          rate_limiter_(std::move(rate_limiter)),
+          rate_limiting_enabled_(rate_limiting_enabled)
     {
         accept();
     }
@@ -387,13 +390,11 @@ private:
             {
                 if (!ec)
                 {
-                    std::cout
-                        << "Client connected\n";
-
                     std::make_shared<Session>(
                         std::move(socket),
                         load_balancer_,
-                        rate_limiter_)
+                        rate_limiter_,
+                        rate_limiting_enabled_)
                         ->start();
                 }
                 else
@@ -414,6 +415,7 @@ int main()
     try
     {
         asio::io_context io_context;
+        constexpr bool rate_limiting_enabled = true;
 
         // ========================================================
         // Redis-backed Rate Limiter
@@ -426,8 +428,8 @@ int main()
         auto rate_limiter =
             std::make_shared<RateLimiter>(
                 *rate_limit_store,
-                100.0, // bucket capacity
-                10.0); // tokens refilled per second
+                100000.0, // bucket capacity
+                100000.0); // tokens refilled per second
 
         // ========================================================
         // Load Balancer
@@ -459,15 +461,17 @@ int main()
             io_context,
             8080,
             load_balancer,
-            rate_limiter);
+            rate_limiter,
+            rate_limiting_enabled
+        );
 
         std::cout
             << "Async server listening on port 8080...\n";
 
         std::cout
-            << "Rate limiter: "
-            << "capacity=100, "
-            << "refill_rate=10 tokens/sec\n";
+            << "Rate limiting: "
+            << (rate_limiting_enabled ? "enabled" : "disabled")
+            << '\n';
 
         io_context.run();
     }

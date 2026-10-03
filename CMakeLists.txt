@@ -194,3 +194,21 @@ add_test(
     NAME RedisRateLimitConcurrencyTest
     COMMAND redis_rate_limit_concurrency_test
 )
+
+add_executable(redis_rate_limit_benchmark
+    tests/redis_rate_limit_benchmark.cpp
+    src/redis_rate_limit_store.cpp
+)
+
+target_include_directories(redis_rate_limit_benchmark
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(redis_rate_limit_benchmark
+    PRIVATE
+    Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ws2_32
+    mswsock
+)

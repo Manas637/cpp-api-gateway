@@ -1,8 +1,10 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 import json
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
 
     def do_GET(self):
 
@@ -28,8 +30,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-server = HTTPServer(("localhost", 9002), Handler)
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
-print("Backend server 2 listening on port 9002...")
+
+server = ThreadedHTTPServer(("localhost", 9002), Handler)
+
+print("Backend server 1 listening on port 9002...")
 
 server.serve_forever()

@@ -19,6 +19,8 @@ public:
         double refill_rate,
         ConsumeHandler handler) override;
 
+    void shutdown();
+
 private:
     boost::redis::connection connection_;
 };
