@@ -39,6 +39,7 @@ private:
 
     std::shared_ptr<LoadBalancer> load_balancer_;
     std::shared_ptr<RateLimiter> rate_limiter_;
+
     bool rate_limiting_enabled_;
 
     Backend *selected_backend_ = nullptr;
@@ -47,6 +48,10 @@ private:
     std::string client_id_;
 
     std::shared_ptr<Metrics> metrics_;
+
+    // Ensures every accepted client connection contributes exactly
+    // one increment and one decrement to active_connections.
+    bool connection_tracked_ = false;
 
 public:
     Session(
@@ -65,12 +70,57 @@ public:
     {
     }
 
+    ~Session()
+    {
+        mark_connection_closed();
+    }
+
     void start()
     {
+        mark_connection_opened();
         read_request();
     }
 
 private:
+    // -------------------------------------------------------------------------
+    // Connection lifecycle metrics
+    // -------------------------------------------------------------------------
+
+    void mark_connection_opened()
+    {
+        if (connection_tracked_)
+            return;
+
+        connection_tracked_ = true;
+        metrics_->connection_opened();
+    }
+
+    void mark_connection_closed()
+    {
+        if (!connection_tracked_)
+            return;
+
+        connection_tracked_ = false;
+        metrics_->connection_closed();
+    }
+
+    void close_client_connection()
+    {
+        mark_connection_closed();
+
+        beast::error_code ec;
+
+        socket_.shutdown(
+            tcp::socket::shutdown_both,
+            ec);
+
+        socket_.close(ec);
+    }
+
+    // -------------------------------------------------------------------------
+    // 503 response
+    // -------------------------------------------------------------------------
+
     void send_service_unavailable()
     {
         auto self = shared_from_this();
@@ -89,6 +139,11 @@ private:
 
         error_response_.prepare_payload();
 
+        // Record the response before starting the asynchronous write.
+        // This avoids a race where the client receives the response before
+        // the write completion callback updates the metric.
+        self->metrics_->record_response(503);
+
         http::async_write(
             socket_,
             error_response_,
@@ -101,15 +156,18 @@ private:
                         << ec.message()
                         << '\n';
 
+                    self->close_client_connection();
                     return;
                 }
-
-                self->metrics_->record_response(503);
 
                 self->request_ = {};
                 self->read_request();
             });
     }
+
+    // -------------------------------------------------------------------------
+    // Client request
+    // -------------------------------------------------------------------------
 
     void read_request()
     {
@@ -123,12 +181,7 @@ private:
             {
                 if (ec == http::error::end_of_stream)
                 {
-                    beast::error_code shutdown_ec;
-
-                    self->socket_.shutdown(
-                        tcp::socket::shutdown_both,
-                        shutdown_ec);
-
+                    self->close_client_connection();
                     return;
                 }
 
@@ -139,6 +192,16 @@ private:
                         << ec.message()
                         << '\n';
 
+                    self->close_client_connection();
+                    return;
+                }
+
+                // Prometheus endpoint intentionally bypasses the normal
+                // request/rate-limit/backend pipeline.
+                if (self->request_.method() == http::verb::get &&
+                    self->request_.target() == "/metrics")
+                {
+                    self->send_metrics_response();
                     return;
                 }
 
@@ -156,6 +219,7 @@ private:
                         << endpoint_ec.message()
                         << '\n';
 
+                    self->close_client_connection();
                     return;
                 }
 
@@ -172,6 +236,10 @@ private:
                 }
             });
     }
+
+    // -------------------------------------------------------------------------
+    // Rate limiting
+    // -------------------------------------------------------------------------
 
     void check_rate_limit()
     {
@@ -211,6 +279,9 @@ private:
 
         rate_limit_response_.prepare_payload();
 
+        // Record before async_write for deterministic metrics.
+        self->metrics_->record_response(429);
+
         http::async_write(
             socket_,
             rate_limit_response_,
@@ -225,18 +296,17 @@ private:
                         << ec.message()
                         << '\n';
 
+                    self->close_client_connection();
                     return;
                 }
 
-                self->metrics_->record_response(429);
-
-                beast::error_code shutdown_ec;
-
-                self->socket_.shutdown(
-                    tcp::socket::shutdown_send,
-                    shutdown_ec);
+                self->close_client_connection();
             });
     }
+
+    // -------------------------------------------------------------------------
+    // Backend connection
+    // -------------------------------------------------------------------------
 
     void connect_to_backend()
     {
@@ -356,11 +426,14 @@ private:
                         }
 
                         self->backend_connected_ = true;
-
                         self->send_to_backend();
                     });
             });
     }
+
+    // -------------------------------------------------------------------------
+    // Backend request
+    // -------------------------------------------------------------------------
 
     void send_to_backend()
     {
@@ -411,6 +484,10 @@ private:
                 self->read_from_backend();
             });
     }
+
+    // -------------------------------------------------------------------------
+    // Backend response
+    // -------------------------------------------------------------------------
 
     void read_from_backend()
     {
@@ -474,12 +551,21 @@ private:
             });
     }
 
+    // -------------------------------------------------------------------------
+    // Client response
+    // -------------------------------------------------------------------------
+
     void send_to_client()
     {
         auto self = shared_from_this();
 
         backend_response_.version(
             request_.version());
+
+        // Record before async_write so the metric is updated by the time
+        // the client receives the response.
+        self->metrics_->record_response(
+            backend_response_.result_int());
 
         http::async_write(
             socket_,
@@ -496,11 +582,9 @@ private:
                         << ec.message()
                         << '\n';
 
+                    self->close_client_connection();
                     return;
                 }
-
-                self->metrics_->record_response(
-                    self->backend_response_.result_int());
 
                 self->request_ = {};
                 self->backend_response_ = {};
@@ -508,7 +592,64 @@ private:
                 self->read_request();
             });
     }
+
+    // -------------------------------------------------------------------------
+    // Prometheus metrics endpoint
+    // -------------------------------------------------------------------------
+
+    void send_metrics_response()
+    {
+        auto response =
+            std::make_shared<
+                http::response<http::string_body>>(
+                http::status::ok,
+                request_.version());
+
+        response->set(
+            http::field::content_type,
+            "text/plain; version=0.0.4; charset=utf-8");
+
+        response->set(
+            http::field::server,
+            "cpp-api-gateway");
+
+        response->keep_alive(false);
+
+        response->body() =
+            metrics_->to_prometheus();
+
+        response->prepare_payload();
+
+        auto self = shared_from_this();
+
+        http::async_write(
+            socket_,
+            *response,
+
+            [self, response](
+                beast::error_code ec,
+                std::size_t)
+            {
+                if (ec)
+                {
+                    std::cerr
+                        << "Metrics response error: "
+                        << ec.message()
+                        << '\n';
+
+                    self->close_client_connection();
+                    return;
+                }
+
+                // /metrics uses Connection: close semantics.
+                self->close_client_connection();
+            });
+    }
 };
+
+// =============================================================================
+// Server
+// =============================================================================
 
 class Server
 {
@@ -518,6 +659,7 @@ private:
 
     std::shared_ptr<LoadBalancer> load_balancer_;
     std::shared_ptr<RateLimiter> rate_limiter_;
+
     bool rate_limiting_enabled_;
 
     std::shared_ptr<Metrics> metrics_;
@@ -559,14 +701,23 @@ private:
                         metrics_,
                         rate_limiting_enabled_)
                         ->start();
+
+                    accept();
+                    return;
                 }
-                else
+
+                // When the acceptor/io_context is being shut down,
+                // operation_aborted is expected. Do not recursively
+                // schedule another accept in that case.
+                if (ec == asio::error::operation_aborted)
                 {
-                    std::cerr
-                        << "Accept error: "
-                        << ec.message()
-                        << '\n';
+                    return;
                 }
+
+                std::cerr
+                    << "Accept error: "
+                    << ec.message()
+                    << '\n';
 
                 accept();
             });

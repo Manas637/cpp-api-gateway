@@ -1,3 +1,4 @@
+#include <sstream>
 #include "metrics.hpp"
 
 // ============================================================
@@ -210,4 +211,109 @@ std::uint64_t Metrics::active_connections() const
 {
     return active_connections_.load(
         std::memory_order_relaxed);
+}
+
+std::string Metrics::to_prometheus() const
+{
+    std::ostringstream output;
+
+    output
+        << "# HELP gateway_requests_total Total HTTP requests received by the gateway\n"
+        << "# TYPE gateway_requests_total counter\n"
+        << "gateway_requests_total "
+        << requests_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_responses_2xx_total Total HTTP 2xx responses\n"
+        << "# TYPE gateway_responses_2xx_total counter\n"
+        << "gateway_responses_2xx_total "
+        << responses_2xx_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_responses_4xx_total Total HTTP 4xx responses\n"
+        << "# TYPE gateway_responses_4xx_total counter\n"
+        << "gateway_responses_4xx_total "
+        << responses_4xx_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_responses_5xx_total Total HTTP 5xx responses\n"
+        << "# TYPE gateway_responses_5xx_total counter\n"
+        << "gateway_responses_5xx_total "
+        << responses_5xx_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_backend_requests_total Total requests sent to backends\n"
+        << "# TYPE gateway_backend_requests_total counter\n"
+        << "gateway_backend_requests_total "
+        << backend_requests_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_backend_successes_total Total successful backend responses\n"
+        << "# TYPE gateway_backend_successes_total counter\n"
+        << "gateway_backend_successes_total "
+        << backend_successes_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_backend_failures_total Total backend failures\n"
+        << "# TYPE gateway_backend_failures_total counter\n"
+        << "gateway_backend_failures_total "
+        << backend_failures_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_failovers_total Total backend failovers\n"
+        << "# TYPE gateway_failovers_total counter\n"
+        << "gateway_failovers_total "
+        << failovers_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_rate_limit_allowed_total Total requests allowed by the rate limiter\n"
+        << "# TYPE gateway_rate_limit_allowed_total counter\n"
+        << "gateway_rate_limit_allowed_total "
+        << rate_limit_allowed_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_rate_limit_rejected_total Total requests rejected by the rate limiter\n"
+        << "# TYPE gateway_rate_limit_rejected_total counter\n"
+        << "gateway_rate_limit_rejected_total "
+        << rate_limit_rejected_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_circuit_opens_total Total circuit breaker openings\n"
+        << "# TYPE gateway_circuit_opens_total counter\n"
+        << "gateway_circuit_opens_total "
+        << circuit_opens_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_circuit_half_opens_total Total circuit breaker half-open transitions\n"
+        << "# TYPE gateway_circuit_half_opens_total counter\n"
+        << "gateway_circuit_half_opens_total "
+        << circuit_half_opens_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_circuit_recoveries_total Total circuit breaker recoveries\n"
+        << "# TYPE gateway_circuit_recoveries_total counter\n"
+        << "gateway_circuit_recoveries_total "
+        << circuit_recoveries_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_active_connections Current number of active client connections\n"
+        << "# TYPE gateway_active_connections gauge\n"
+        << "gateway_active_connections "
+        << active_connections()
+        << '\n';
+
+    return output.str();
 }

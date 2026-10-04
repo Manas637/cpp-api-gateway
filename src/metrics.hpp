@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 class Metrics
 {
@@ -65,6 +66,8 @@ public:
     std::uint64_t circuit_recoveries_total() const;
 
     std::uint64_t active_connections() const;
+
+    std::string to_prometheus() const;
 
 private:
     std::atomic<std::uint64_t> requests_total_{0};

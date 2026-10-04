@@ -312,3 +312,76 @@ add_test(
     NAME MetricsTest
     COMMAND metrics_test
 )
+
+# -------------------------
+# Prometheus Metrics Test
+# -------------------------
+
+add_executable(metrics_prometheus_test
+    tests/metrics_prometheus_test.cpp
+    src/metrics.cpp
+)
+
+target_include_directories(
+    metrics_prometheus_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+add_test(
+    NAME MetricsPrometheusTest
+    COMMAND metrics_prometheus_test
+)
+
+add_executable(metrics_endpoint_integration_test
+    tests/metrics_endpoint_integration_test.cpp
+    src/rate_limiter.cpp
+    src/in_memory_rate_limit_store.cpp
+    src/metrics.cpp
+)
+
+target_include_directories(metrics_endpoint_integration_test
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(metrics_endpoint_integration_test
+    Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ws2_32
+    mswsock
+)
+
+add_test(
+    NAME MetricsEndpointIntegrationTest
+    COMMAND metrics_endpoint_integration_test
+)
+
+add_executable(
+    ActiveConnectionsIntegrationTest
+    tests/active_connections_integration_test.cpp
+    src/rate_limiter.cpp
+    src/in_memory_rate_limit_store.cpp
+    src/metrics.cpp
+)
+
+target_include_directories(
+    ActiveConnectionsIntegrationTest
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(
+    ActiveConnectionsIntegrationTest
+    PRIVATE
+    Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ws2_32
+    mswsock
+)
+
+add_test(
+    NAME ActiveConnectionsIntegrationTest
+    COMMAND ActiveConnectionsIntegrationTest
+)
