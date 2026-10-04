@@ -1,5 +1,6 @@
 #include <cassert>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -63,6 +64,35 @@ std::string send_request(
     assert(response.result_int() == expected_status);
 
     return response.body();
+}
+
+// -----------------------------------------------------------------------------
+// Wait for an asynchronously recorded request-latency sample.
+//
+// The gateway records request latency in the async_write completion handler.
+// The client may finish reading the HTTP response before that handler has
+// updated the Metrics object, so the test must synchronize with the metric.
+// -----------------------------------------------------------------------------
+
+bool wait_for_request_duration_count(
+    const std::shared_ptr<Metrics> &metrics,
+    std::uint64_t expected_count,
+    std::chrono::milliseconds timeout =
+        std::chrono::milliseconds(1000))
+{
+    const auto deadline =
+        std::chrono::steady_clock::now() + timeout;
+
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (metrics->request_duration_count() >= expected_count)
+            return true;
+
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(5));
+    }
+
+    return metrics->request_duration_count() >= expected_count;
 }
 
 int main()
@@ -179,10 +209,25 @@ int main()
     auto rate_limit_store =
         std::make_unique<InMemoryRateLimitStore>();
 
+    // Capacity = 2 and refill rate = 0.
+    //
+    // Request 1 -> allowed
+    // Request 2 -> allowed
+    // Request 3 -> rejected
+    //
+    // We use:
+    //
+    // Request 1 -> 200
+    // Request 2 -> 503
+    // Request 3 -> 429
+    //
+    // This lets us test both the 503 and 429 latency paths without
+    // needing a reset operation on the in-memory rate limiter.
+
     auto rate_limiter =
         std::make_shared<RateLimiter>(
             *rate_limit_store,
-            1.0,
+            2.0,
             0.0);
 
     GatewayConfig config;
@@ -196,7 +241,7 @@ int main()
             5,
             std::chrono::milliseconds(100))};
 
-    config.rate_limit_capacity = 1.0;
+    config.rate_limit_capacity = 2.0;
     config.rate_limit_refill_rate = 0.0;
 
     Server server(
@@ -222,7 +267,7 @@ int main()
         std::chrono::milliseconds(100));
 
     // -------------------------------------------------------------------------
-    // TEST 1: Normal request
+    // TEST 1: Normal request -> 200
     // -------------------------------------------------------------------------
 
     std::cerr << "[TEST] Starting normal request\n";
@@ -237,18 +282,124 @@ int main()
 
     assert(response == "backend");
 
+    // Request counters.
     assert(metrics->requests_total() == 1);
+
+    // Backend counters.
     assert(metrics->backend_requests_total() == 1);
     assert(metrics->backend_successes_total() == 1);
+    assert(metrics->backend_failures_total() == 0);
+
+    // HTTP response counters.
     assert(metrics->responses_2xx_total() == 1);
+    assert(metrics->responses_4xx_total() == 0);
+    assert(metrics->responses_5xx_total() == 0);
+
+    // Rate limiting.
     assert(metrics->rate_limit_allowed_total() == 1);
     assert(metrics->rate_limit_rejected_total() == 0);
+
+    // The real HTTP request must have recorded request latency.
+    //
+    // Latency is recorded from the async_write completion handler,
+    // so wait for that asynchronous metric update before asserting.
+    assert(wait_for_request_duration_count(metrics, 1));
+    assert(metrics->request_duration_sum_us() > 0);
 
     std::cout
         << "[PASS] normal request establishes metrics\n";
 
     // -------------------------------------------------------------------------
-    // TEST 2: /metrics bypasses normal request pipeline
+    // TEST 2: Backend unavailable -> 503
+    // -------------------------------------------------------------------------
+
+    std::cerr << "[TEST] Marking backend unhealthy\n";
+
+    // Prevent the load balancer from selecting the backend.
+    assert(!load_balancer->backends().empty());
+
+    load_balancer->backends()[0].healthy = false;
+
+    std::cerr << "[TEST] Starting 503 request\n";
+
+    response =
+        send_request(
+            gateway_port,
+            "/",
+            503);
+
+    std::cerr << "[TEST] 503 request completed\n";
+
+    // The request itself must have been counted.
+    assert(metrics->requests_total() == 2);
+
+    // The first request reached the backend.
+    // The second request was allowed through the rate limiter but
+    // could not find a healthy backend.
+    assert(metrics->backend_requests_total() == 1);
+    assert(metrics->backend_successes_total() == 1);
+
+    // We now have:
+    //   1 x 2xx
+    //   0 x 4xx
+    //   1 x 5xx
+    assert(metrics->responses_2xx_total() == 1);
+    assert(metrics->responses_4xx_total() == 0);
+    assert(metrics->responses_5xx_total() == 1);
+
+    // Both requests were allowed by the rate limiter.
+    assert(metrics->rate_limit_allowed_total() == 2);
+    assert(metrics->rate_limit_rejected_total() == 0);
+
+    // The 503 response must be included in request latency.
+    assert(wait_for_request_duration_count(metrics, 2));
+    assert(metrics->request_duration_sum_us() > 0);
+
+    std::cout
+        << "[PASS] 503 response records request latency\n";
+
+    // -------------------------------------------------------------------------
+    // TEST 3: Rate-limited request -> 429
+    // -------------------------------------------------------------------------
+
+    std::cerr << "[TEST] Starting rate-limited request\n";
+
+    response =
+        send_request(
+            gateway_port,
+            "/",
+            429);
+
+    std::cerr << "[TEST] Rate-limited request completed\n";
+
+    // The request itself must have been counted.
+    assert(metrics->requests_total() == 3);
+
+    // It must NOT have reached the backend.
+    assert(metrics->backend_requests_total() == 1);
+    assert(metrics->backend_successes_total() == 1);
+
+    // We now have:
+    //   1 x 2xx
+    //   1 x 4xx
+    //   1 x 5xx
+    assert(metrics->responses_2xx_total() == 1);
+    assert(metrics->responses_4xx_total() == 1);
+    assert(metrics->responses_5xx_total() == 1);
+
+    // Two requests were allowed and the third was rejected.
+    assert(metrics->rate_limit_allowed_total() == 2);
+    assert(metrics->rate_limit_rejected_total() == 1);
+
+    // The 429 response must also be included in request latency.
+    assert(wait_for_request_duration_count(metrics, 3));
+    assert(metrics->request_duration_sum_us() > 0);
+
+    std::cout
+        << "[PASS] 429 response records request latency\n";
+
+    // -------------------------------------------------------------------------
+    // TEST 4: /metrics bypasses normal request pipeline
     // -------------------------------------------------------------------------
 
     std::cerr << "[TEST] Starting /metrics request\n";
@@ -261,27 +412,74 @@ int main()
 
     std::cerr << "[TEST] /metrics request completed\n";
 
-    assert(
-        response.find("gateway_requests_total 1") != std::string::npos);
+    // -------------------------------------------------------------------------
+    // Verify normal counters are exposed.
+    // -------------------------------------------------------------------------
 
     assert(
-        response.find("gateway_backend_requests_total 1") != std::string::npos);
+        response.find(
+            "gateway_requests_total 3") != std::string::npos);
 
     assert(
-        response.find("gateway_backend_successes_total 1") != std::string::npos);
+        response.find(
+            "gateway_backend_requests_total 1") != std::string::npos);
 
     assert(
-        response.find("gateway_responses_2xx_total 1") != std::string::npos);
+        response.find(
+            "gateway_backend_successes_total 1") != std::string::npos);
 
-    // The metrics scrape itself must NOT modify these.
-    assert(metrics->requests_total() == 1);
+    assert(
+        response.find(
+            "gateway_responses_2xx_total 1") != std::string::npos);
+
+    assert(
+        response.find(
+            "gateway_responses_4xx_total 1") != std::string::npos);
+
+    assert(
+        response.find(
+            "gateway_responses_5xx_total 1") != std::string::npos);
+
+    // -------------------------------------------------------------------------
+    // Verify latency histogram.
+    // -------------------------------------------------------------------------
+
+    // Exactly three real HTTP requests were processed.
+    assert(
+        response.find(
+            "gateway_request_duration_seconds_count 3\n") != std::string::npos);
+
+    // All three observations must be included in +Inf.
+    assert(
+        response.find(
+            "gateway_request_duration_seconds_bucket{le=\"+Inf\"} 3\n") != std::string::npos);
+
+    // -------------------------------------------------------------------------
+    // /metrics itself must NOT modify request metrics.
+    // -------------------------------------------------------------------------
+
+    assert(metrics->requests_total() == 3);
+
     assert(metrics->backend_requests_total() == 1);
     assert(metrics->backend_successes_total() == 1);
-    assert(metrics->responses_2xx_total() == 1);
 
+    assert(metrics->responses_2xx_total() == 1);
+    assert(metrics->responses_4xx_total() == 1);
+    assert(metrics->responses_5xx_total() == 1);
+
+    // The histogram must still contain exactly three real requests.
+    //
+    // The /metrics request intentionally does not contribute a latency
+    // observation.
+    assert(wait_for_request_duration_count(metrics, 3));
+    assert(metrics->request_duration_count() == 3);
+
+    // -------------------------------------------------------------------------
     // /metrics must bypass rate limiting.
-    assert(metrics->rate_limit_allowed_total() == 1);
-    assert(metrics->rate_limit_rejected_total() == 0);
+    // -------------------------------------------------------------------------
+
+    assert(metrics->rate_limit_allowed_total() == 2);
+    assert(metrics->rate_limit_rejected_total() == 1);
 
     std::cout
         << "[PASS] /metrics bypasses request pipeline\n";

@@ -315,5 +315,79 @@ std::string Metrics::to_prometheus() const
         << active_connections()
         << '\n';
 
+    output
+        << "# HELP gateway_request_duration_seconds "
+           "HTTP request duration in seconds\n"
+        << "# TYPE gateway_request_duration_seconds histogram\n";
+
+    for (std::size_t i = 0;
+         i < request_duration_buckets_us_.size();
+         ++i)
+    {
+        const double seconds =
+            static_cast<double>(
+                request_duration_buckets_us_[i]) /
+            1'000'000.0;
+
+        output
+            << "gateway_request_duration_seconds_bucket{le=\""
+            << seconds
+            << "\"} "
+            << request_duration_bucket_counts_[i].load(
+                   std::memory_order_relaxed)
+            << '\n';
+    }
+
+    output
+        << "gateway_request_duration_seconds_bucket{le=\"+Inf\"} "
+        << request_duration_count()
+        << '\n';
+
+    output
+        << "gateway_request_duration_seconds_sum "
+        << static_cast<double>(request_duration_sum_us()) /
+               1'000'000.0
+        << '\n';
+
+    output
+        << "gateway_request_duration_seconds_count "
+        << request_duration_count()
+        << '\n';
+
     return output.str();
+}
+
+void Metrics::record_request_duration(std::uint64_t duration_us)
+{
+    request_duration_count_.fetch_add(
+        1,
+        std::memory_order_relaxed);
+
+    request_duration_sum_us_.fetch_add(
+        duration_us,
+        std::memory_order_relaxed);
+
+    for (std::size_t i = 0;
+         i < request_duration_buckets_us_.size();
+         ++i)
+    {
+        if (duration_us <= request_duration_buckets_us_[i])
+        {
+            request_duration_bucket_counts_[i].fetch_add(
+                1,
+                std::memory_order_relaxed);
+        }
+    }
+}
+
+std::uint64_t Metrics::request_duration_count() const
+{
+    return request_duration_count_.load(
+        std::memory_order_relaxed);
+}
+
+std::uint64_t Metrics::request_duration_sum_us() const
+{
+    return request_duration_sum_us_.load(
+        std::memory_order_relaxed);
 }

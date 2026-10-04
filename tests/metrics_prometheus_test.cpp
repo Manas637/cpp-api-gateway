@@ -33,8 +33,58 @@ int main()
 
     metrics.connection_opened();
 
+    // Request latency histogram.
+    // 3ms, 8ms, and 30ms.
+    metrics.record_request_duration(3'000);
+    metrics.record_request_duration(8'000);
+    metrics.record_request_duration(30'000);
+
     const std::string output =
         metrics.to_prometheus();
+
+    // Check request latency histogram values.
+
+    assert(
+        output.find(
+            "gateway_request_duration_seconds_bucket{le=\"0.001\"} 0\n") != std::string::npos);
+
+    assert(
+        output.find(
+            "gateway_request_duration_seconds_bucket{le=\"0.005\"} 1\n") != std::string::npos);
+
+    assert(
+        output.find(
+            "gateway_request_duration_seconds_bucket{le=\"0.01\"} 2\n") != std::string::npos);
+
+    assert(
+        output.find(
+            "gateway_request_duration_seconds_bucket{le=\"0.025\"} 2\n") != std::string::npos);
+
+    assert(
+        output.find(
+            "gateway_request_duration_seconds_bucket{le=\"0.05\"} 3\n") != std::string::npos);
+
+    assert(
+        output.find(
+            "gateway_request_duration_seconds_bucket{le=\"+Inf\"} 3\n") != std::string::npos);
+
+    // Check histogram count.
+    assert(
+        output.find(
+            "gateway_request_duration_seconds_count 3\n") != std::string::npos);
+
+    // Check histogram sum: 3ms + 8ms + 30ms = 41ms.
+    assert(
+        output.find(
+            "gateway_request_duration_seconds_sum 0.041\n") != std::string::npos);
+
+    // Check Prometheus histogram metadata.
+    assert(
+        output.find(
+            "# TYPE gateway_request_duration_seconds histogram\n") != std::string::npos);
+
+    std::cout
+        << "[PASS] Request latency histogram rendering\n";
 
     // Check metric values.
     assert(

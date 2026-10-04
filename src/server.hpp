@@ -4,6 +4,8 @@
 #include <boost/beast.hpp>
 #include <boost/beast/http.hpp>
 
+#include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -53,6 +55,10 @@ private:
     // one increment and one decrement to active_connections.
     bool connection_tracked_ = false;
 
+    // Start time of the currently processed HTTP request.
+    // This is reset for every request on a keep-alive connection.
+    std::chrono::steady_clock::time_point request_started_at_;
+
 public:
     Session(
         tcp::socket socket,
@@ -83,6 +89,21 @@ public:
 
 private:
     // -------------------------------------------------------------------------
+    // Request latency metrics
+    // -------------------------------------------------------------------------
+
+    void record_request_duration()
+    {
+        const auto duration =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() -
+                request_started_at_);
+
+        metrics_->record_request_duration(
+            static_cast<std::uint64_t>(duration.count()));
+    }
+
+    // -------------------------------------------------------------------------
     // Connection lifecycle metrics
     // -------------------------------------------------------------------------
 
@@ -92,6 +113,7 @@ private:
             return;
 
         connection_tracked_ = true;
+
         metrics_->connection_opened();
     }
 
@@ -101,6 +123,7 @@ private:
             return;
 
         connection_tracked_ = false;
+
         metrics_->connection_closed();
     }
 
@@ -139,9 +162,7 @@ private:
 
         error_response_.prepare_payload();
 
-        // Record the response before starting the asynchronous write.
-        // This avoids a race where the client receives the response before
-        // the write completion callback updates the metric.
+        // Record the HTTP response before starting the asynchronous write.
         self->metrics_->record_response(503);
 
         http::async_write(
@@ -159,6 +180,10 @@ private:
                     self->close_client_connection();
                     return;
                 }
+
+                // The response was successfully written to the client,
+                // so the request has completed.
+                self->record_request_duration();
 
                 self->request_ = {};
                 self->read_request();
@@ -207,6 +232,11 @@ private:
 
                 self->metrics_->record_request();
 
+                // Start measuring this HTTP request.
+                // This is intentionally after the /metrics bypass.
+                self->request_started_at_ =
+                    std::chrono::steady_clock::now();
+
                 beast::error_code endpoint_ec;
 
                 auto endpoint =
@@ -252,11 +282,13 @@ private:
                 if (!allowed)
                 {
                     self->metrics_->record_rate_limit_rejected();
+
                     self->send_rate_limit_response();
                     return;
                 }
 
                 self->metrics_->record_rate_limit_allowed();
+
                 self->connect_to_backend();
             });
     }
@@ -279,7 +311,7 @@ private:
 
         rate_limit_response_.prepare_payload();
 
-        // Record before async_write for deterministic metrics.
+        // Record the response before async_write.
         self->metrics_->record_response(429);
 
         http::async_write(
@@ -299,6 +331,10 @@ private:
                     self->close_client_connection();
                     return;
                 }
+
+                // The 429 response was successfully written,
+                // so record the completed request latency.
+                self->record_request_duration();
 
                 self->close_client_connection();
             });
@@ -380,6 +416,7 @@ private:
                     }
 
                     self->backend_connected_ = false;
+
                     self->connect_to_backend();
 
                     return;
@@ -426,6 +463,7 @@ private:
                         }
 
                         self->backend_connected_ = true;
+
                         self->send_to_backend();
                     });
             });
@@ -562,8 +600,8 @@ private:
         backend_response_.version(
             request_.version());
 
-        // Record before async_write so the metric is updated by the time
-        // the client receives the response.
+        // Record before async_write so the response metric is updated
+        // by the time the client receives the response.
         self->metrics_->record_response(
             backend_response_.result_int());
 
@@ -585,6 +623,10 @@ private:
                     self->close_client_connection();
                     return;
                 }
+
+                // The complete response has been successfully written
+                // to the client. Record end-to-end request latency.
+                self->record_request_duration();
 
                 self->request_ = {};
                 self->backend_response_ = {};
@@ -642,6 +684,7 @@ private:
                 }
 
                 // /metrics uses Connection: close semantics.
+                // It intentionally does not contribute to request metrics.
                 self->close_client_connection();
             });
     }
@@ -703,6 +746,7 @@ private:
                         ->start();
 
                     accept();
+
                     return;
                 }
 
