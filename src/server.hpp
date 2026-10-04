@@ -15,6 +15,7 @@
 #include "load_balancer.hpp"
 #include "rate_limiter.hpp"
 #include "metrics.hpp"
+#include "status_handler.hpp"
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -227,6 +228,13 @@ private:
                     self->request_.target() == "/metrics")
                 {
                     self->send_metrics_response();
+                    return;
+                }
+
+                if (self->request_.method() == http::verb::get &&
+                    self->request_.target() == "/api/status")
+                {
+                    self->send_status_response();
                     return;
                 }
 
@@ -685,6 +693,56 @@ private:
 
                 // /metrics uses Connection: close semantics.
                 // It intentionally does not contribute to request metrics.
+                self->close_client_connection();
+            });
+    }
+
+    void send_status_response()
+    {
+        auto response =
+            std::make_shared<
+                http::response<http::string_body>>(
+                http::status::ok,
+                request_.version());
+
+        response->set(
+            http::field::content_type,
+            "application/json");
+
+        response->set(
+            http::field::server,
+            "cpp-api-gateway");
+
+        response->keep_alive(false);
+
+        response->body() =
+            StatusHandler::build_json(
+                *load_balancer_,
+                *metrics_,
+                rate_limiting_enabled_);
+
+        response->prepare_payload();
+
+        auto self = shared_from_this();
+
+        http::async_write(
+            socket_,
+            *response,
+            [self, response](
+                beast::error_code ec,
+                std::size_t)
+            {
+                if (ec)
+                {
+                    std::cerr
+                        << "Status response error: "
+                        << ec.message()
+                        << '\n';
+
+                    self->close_client_connection();
+                    return;
+                }
+
                 self->close_client_connection();
             });
     }

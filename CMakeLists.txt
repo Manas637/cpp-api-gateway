@@ -385,3 +385,37 @@ add_test(
     NAME ActiveConnectionsIntegrationTest
     COMMAND ActiveConnectionsIntegrationTest
 )
+
+# -------------------------
+# Status Endpoint
+# Integration Test
+# -------------------------
+
+add_executable(
+    status_endpoint_integration_test
+    tests/status_endpoint_integration_test.cpp
+    src/rate_limiter.cpp
+    src/in_memory_rate_limit_store.cpp
+    src/metrics.cpp
+)
+
+target_include_directories(
+    status_endpoint_integration_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(
+    status_endpoint_integration_test
+    PRIVATE
+    Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ws2_32
+    mswsock
+)
+
+add_test(
+    NAME StatusEndpointIntegrationTest
+    COMMAND status_endpoint_integration_test
+)

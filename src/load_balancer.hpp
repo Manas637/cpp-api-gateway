@@ -67,4 +67,9 @@ public:
     {
         return backends_;
     }
+
+    const std::vector<Backend> &backends() const
+    {
+        return backends_;
+    }
 };
