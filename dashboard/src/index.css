@@ -1,0 +1,733 @@
+:root {
+  font-family:
+    Inter,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+
+  color: #e5e7eb;
+  background: #0b0f14;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  background: #0b0f14;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #0b0f14;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* =========================================================
+   DASHBOARD
+   ========================================================= */
+
+.dashboard {
+  width: min(1200px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 48px 0 64px;
+}
+
+/* =========================================================
+   HEADER
+   ========================================================= */
+
+.dashboard-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 32px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+
+  color: #6b7280;
+
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 8px;
+
+  font-size: clamp(32px, 5vw, 48px);
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+}
+
+.subtitle {
+  margin-bottom: 0;
+
+  color: #8b95a5;
+  font-size: 14px;
+}
+
+/* =========================================================
+   STATUS
+   ========================================================= */
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+
+  padding: 10px 15px;
+
+  border: 1px solid #26303d;
+  border-radius: 999px;
+
+  background: #111720;
+
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+
+  border-radius: 50%;
+
+  background: currentColor;
+
+  box-shadow: 0 0 10px currentColor;
+}
+
+.status-badge.healthy {
+  color: #4ade80;
+}
+
+.status-badge.degraded {
+  color: #facc15;
+}
+
+.status-badge.unhealthy {
+  color: #f87171;
+}
+
+/* =========================================================
+   SUMMARY
+   ========================================================= */
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+
+  margin-bottom: 40px;
+}
+
+.summary-card {
+  min-height: 108px;
+
+  padding: 22px;
+
+  border: 1px solid #202936;
+  border-radius: 14px;
+
+  background: #111720;
+
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.summary-card:hover {
+  border-color: #303b4a;
+  transform: translateY(-1px);
+}
+
+.card-label {
+  display: block;
+
+  margin-bottom: 12px;
+
+  color: #7d8796;
+
+  font-size: 13px;
+}
+
+.summary-card strong {
+  font-size: 28px;
+  line-height: 1;
+
+  letter-spacing: -0.02em;
+}
+
+/* =========================================================
+   SECTIONS
+   ========================================================= */
+
+.section {
+  margin-bottom: 40px;
+}
+
+.section-header {
+  margin-bottom: 16px;
+}
+
+.section-header h2 {
+  margin-bottom: 5px;
+
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.section-header p {
+  margin-bottom: 0;
+
+  color: #7d8796;
+
+  font-size: 14px;
+}
+
+/* =========================================================
+   BACKENDS
+   ========================================================= */
+
+.backend-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.backend-card {
+  padding: 20px;
+
+  border: 1px solid #202936;
+  border-radius: 14px;
+
+  background: #111720;
+
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease,
+    background 160ms ease;
+}
+
+.backend-card:hover {
+  transform: translateY(-1px);
+  background: #121922;
+}
+
+.backend-card.healthy {
+  border-color: #1f4530;
+}
+
+.backend-card.unhealthy {
+  border-color: #512b2b;
+}
+
+.backend-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.backend-label {
+  color: #687384;
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.backend-card h3 {
+  margin: 6px 0 0;
+
+  font-size: 17px;
+  line-height: 1.2;
+}
+
+.health-pill {
+  padding: 5px 9px;
+
+  border-radius: 999px;
+
+  font-size: 11px;
+  font-weight: 700;
+
+  white-space: nowrap;
+}
+
+.health-pill.healthy {
+  color: #4ade80;
+  background: #12251a;
+}
+
+.health-pill.unhealthy {
+  color: #f87171;
+  background: #291719;
+}
+
+.backend-details {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.backend-details span {
+  display: block;
+
+  margin-bottom: 5px;
+
+  color: #687384;
+
+  font-size: 12px;
+}
+
+.backend-details strong {
+  font-size: 14px;
+}
+
+/* =========================================================
+   METRICS
+   ========================================================= */
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+.metric-card {
+  min-height: 108px;
+
+  padding: 22px;
+
+  border: 1px solid #202936;
+  border-radius: 14px;
+
+  background: #111720;
+
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.metric-card:hover {
+  border-color: #303b4a;
+  transform: translateY(-1px);
+}
+
+.metric-card strong {
+  display: inline-block;
+
+  margin-right: 7px;
+
+  font-size: 30px;
+  line-height: 1;
+
+  letter-spacing: -0.03em;
+}
+
+.metric-unit {
+  color: #687384;
+  font-size: 13px;
+}
+
+/* =========================================================
+   CHART CARD
+   ========================================================= */
+
+.chart-card {
+  margin-top: 16px;
+
+  padding: 22px;
+
+  border: 1px solid #202936;
+  border-radius: 14px;
+
+  background: #111720;
+}
+
+.chart-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.chart-header h3 {
+  margin-bottom: 5px;
+
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.chart-header p {
+  margin-bottom: 0;
+
+  color: #687384;
+
+  font-size: 13px;
+}
+
+.chart-header>strong {
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+/* =========================================================
+   CHART CONTAINER
+   ========================================================= */
+
+/*
+ * IMPORTANT:
+ * Both charts use exactly the same dimensions.
+ */
+
+.chart-container {
+  position: relative;
+
+  width: 100%;
+  height: 320px;
+
+  color: #60a5fa;
+}
+
+/*
+ * Both SVGs MUST have the same height.
+ */
+
+.request-rate-chart,
+.latency-chart {
+  display: block;
+
+  width: 100%;
+  height: 320px;
+
+  overflow: visible;
+
+  /*
+   * Prevent browser inline-SVG baseline
+   * from creating unexpected bottom spacing.
+   */
+  vertical-align: top;
+}
+
+/* =========================================================
+   CHART EMPTY STATE
+   ========================================================= */
+
+.chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  width: 100%;
+  height: 320px;
+
+  border: 1px dashed #26303d;
+  border-radius: 10px;
+
+  color: #687384;
+
+  font-size: 14px;
+}
+
+/* =========================================================
+   CHART GRID
+   ========================================================= */
+
+.chart-grid-line {
+  stroke: #202936;
+  stroke-width: 1;
+}
+
+/* =========================================================
+   CHART AXES
+   ========================================================= */
+
+.chart-axis-label {
+  fill: #687384;
+
+  font-size: 11px;
+  font-family: inherit;
+
+  user-select: none;
+}
+
+.chart-time-label {
+  dominant-baseline: auto;
+}
+
+/* =========================================================
+   REQUEST RATE
+   ========================================================= */
+
+.request-rate-line {
+  color: #60a5fa;
+}
+
+/* =========================================================
+   LATENCY LINES
+   ========================================================= */
+
+.latency-p50 {
+  color: #60a5fa;
+}
+
+.latency-p95 {
+  color: #f59e0b;
+}
+
+.latency-p99 {
+  color: #f87171;
+}
+
+/* =========================================================
+   LATENCY LEGEND
+   ========================================================= */
+
+.latency-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.legend-p50 {
+  color: #60a5fa;
+}
+
+.legend-p95 {
+  color: #f59e0b;
+}
+
+.legend-p99 {
+  color: #f87171;
+}
+
+/* =========================================================
+   CHART HOVER
+   ========================================================= */
+
+.chart-hover-line {
+  stroke: #4b5563;
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+
+  pointer-events: none;
+}
+
+.hover-point {
+  stroke: #111720;
+  stroke-width: 2;
+
+  pointer-events: none;
+}
+
+.request-point {
+  fill: #60a5fa;
+}
+
+.p50-point {
+  fill: #60a5fa;
+}
+
+.p95-point {
+  fill: #f59e0b;
+}
+
+.p99-point {
+  fill: #f87171;
+}
+
+/* =========================================================
+   TOOLTIP
+   ========================================================= */
+
+.chart-tooltip {
+  fill: #0b0f14;
+
+  stroke: #303b4a;
+  stroke-width: 1;
+
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.28));
+
+  pointer-events: none;
+}
+
+.tooltip-time {
+  fill: #e5e7eb;
+
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tooltip-request {
+  fill: #60a5fa;
+
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tooltip-p50 {
+  fill: #60a5fa;
+
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tooltip-p95 {
+  fill: #f59e0b;
+
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tooltip-p99 {
+  fill: #f87171;
+
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* =========================================================
+   PLACEHOLDER
+   ========================================================= */
+
+.placeholder-section {
+  min-height: 180px;
+
+  padding: 24px;
+
+  border: 1px dashed #26303d;
+  border-radius: 14px;
+
+  background: #0e131a;
+}
+
+/* =========================================================
+   LOADING / ERROR
+   ========================================================= */
+
+.loading,
+.error-card {
+  margin-top: 20vh;
+
+  padding: 30px;
+
+  text-align: center;
+}
+
+.error-card {
+  border: 1px solid #512b2b;
+  border-radius: 14px;
+
+  background: #111720;
+}
+
+.error-card h2 {
+  color: #f87171;
+}
+
+.error-card p {
+  margin-bottom: 0;
+
+  color: #9ca3af;
+}
+
+/* =========================================================
+   RESPONSIVE
+   ========================================================= */
+
+@media (max-width: 900px) {
+  .metrics-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 800px) {
+  .dashboard {
+    width: min(100% - 24px, 600px);
+
+    padding: 28px 0 48px;
+  }
+
+  .dashboard-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .summary-grid,
+  .backend-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chart-card {
+    padding: 18px;
+  }
+}
+
+@media (max-width: 600px) {
+  .chart-header {
+    flex-direction: column;
+  }
+
+  .chart-header>strong {
+    align-self: flex-start;
+  }
+
+  .latency-legend {
+    gap: 10px;
+  }
+}
+
+@media (max-width: 500px) {
+  .metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard {
+    width: min(100% - 20px, 600px);
+  }
+
+  .chart-card {
+    padding: 14px;
+  }
+}
