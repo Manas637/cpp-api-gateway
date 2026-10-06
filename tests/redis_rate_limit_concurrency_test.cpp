@@ -16,7 +16,10 @@ void test_concurrent_requests()
 {
     boost::asio::io_context io_context;
 
-    RedisRateLimitStore store(io_context);
+    RedisRateLimitStore store(
+        io_context,
+        "127.0.0.1",
+        "6379");
 
     RateLimiter limiter(
         store,

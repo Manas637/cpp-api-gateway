@@ -10,6 +10,7 @@
 #include "redis_rate_limit_store.hpp"
 #include "server.hpp"
 #include "metrics.hpp"
+#include "config.hpp"
 
 namespace asio = boost::asio;
 
@@ -19,22 +20,15 @@ int main()
     {
         asio::io_context io_context;
 
-        constexpr bool rate_limiting_enabled = true;
-
         auto metrics = std::make_shared<Metrics>();
 
-        GatewayConfig config{
-            .port = 8080,
-            .backends = {
-                Backend("127.0.0.1", 9001),
-                Backend("127.0.0.1", 9002),
-                Backend("127.0.0.1", 9003)},
-            .rate_limit_capacity = 100000.0,
-            .rate_limit_refill_rate = 100000.0};
+        GatewayConfig config = load_config();
 
         auto rate_limit_store =
             std::make_shared<RedisRateLimitStore>(
-                io_context);
+                io_context,
+                config.redis_host,
+                config.redis_port);
 
         auto rate_limiter =
             std::make_shared<RateLimiter>(
@@ -59,7 +53,7 @@ int main()
             load_balancer,
             rate_limiter,
             metrics,
-            rate_limiting_enabled);
+            config.rate_limiting_enabled);
 
         std::cout
             << "Async server listening on port "
@@ -68,7 +62,7 @@ int main()
 
         std::cout
             << "Rate limiting: "
-            << (rate_limiting_enabled ? "enabled" : "disabled")
+            << (config.rate_limiting_enabled ? "enabled" : "disabled")
             << '\n';
 
         io_context.run();

@@ -22,6 +22,7 @@ add_executable(api_gateway
     src/rate_limiter.cpp
     src/redis_rate_limit_store.cpp
     src/metrics.cpp
+    src/config.cpp
 )
 
 target_include_directories(api_gateway
@@ -418,4 +419,25 @@ target_link_libraries(
 add_test(
     NAME StatusEndpointIntegrationTest
     COMMAND status_endpoint_integration_test
+)
+
+# -------------------------
+# Configuration Test
+# -------------------------
+
+add_executable(
+    config_test
+    tests/config_test.cpp
+    src/config.cpp
+)
+
+target_include_directories(
+    config_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+add_test(
+    NAME ConfigTest
+    COMMAND config_test
 )

@@ -5,3 +5,4 @@ build/
 *.dll
 *.o
 *.obj
+.env

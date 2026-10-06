@@ -11,7 +11,9 @@ class RedisRateLimitStore : public RateLimitStore
 {
 public:
     explicit RedisRateLimitStore(
-        boost::asio::io_context &io_context);
+        boost::asio::io_context &io_context,
+        std::string host,
+        std::string port);
 
     void async_consume(
         const std::string &client_id,

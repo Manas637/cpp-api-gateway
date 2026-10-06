@@ -247,7 +247,10 @@ int main()
 {
     boost::asio::io_context io_context;
 
-    RedisRateLimitStore store(io_context);
+    RedisRateLimitStore store(
+        io_context,
+        "127.0.0.1",
+        "6379");
 
     std::thread io_thread(
         [&]()

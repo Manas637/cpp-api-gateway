@@ -6,6 +6,7 @@
 #include <string>
 #include <chrono>
 #include <atomic>
+#include<utility>
 
 namespace
 {
@@ -84,13 +85,15 @@ return allowed
 }
 
 RedisRateLimitStore::RedisRateLimitStore(
-    boost::asio::io_context &io_context)
+    boost::asio::io_context &io_context,
+    std::string host,
+    std::string port)
     : connection_(io_context)
 {
     boost::redis::config config;
 
-    config.addr.host = "127.0.0.1";
-    config.addr.port = "6379";
+    config.addr.host = std::move(host);
+    config.addr.port = std::move(port);
 
     connection_.async_run(
         config,

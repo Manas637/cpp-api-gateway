@@ -58,7 +58,10 @@ void test_initial_burst()
 {
     boost::asio::io_context io_context;
 
-    RedisRateLimitStore store(io_context);
+    RedisRateLimitStore store(
+        io_context,
+        "127.0.0.1",
+        "6379");
 
     RateLimiter limiter(
         store,
@@ -98,7 +101,10 @@ void test_refill()
 {
     boost::asio::io_context io_context;
 
-    RedisRateLimitStore store(io_context);
+    RedisRateLimitStore store(
+        io_context,
+        "127.0.0.1",
+        "6379");
 
     RateLimiter limiter(
         store,
@@ -146,7 +152,10 @@ void test_different_clients()
 {
     boost::asio::io_context io_context;
 
-    RedisRateLimitStore store(io_context);
+    RedisRateLimitStore store(
+        io_context,
+        "127.0.0.1",
+        "6379");
 
     RateLimiter limiter(
         store,
