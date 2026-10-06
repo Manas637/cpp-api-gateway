@@ -10,6 +10,11 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <atomic>
+#include <chrono>
+#include <iomanip>
+#include <random>
+#include <sstream>
 
 #include "gateway_config.hpp"
 #include "load_balancer.hpp"
@@ -22,6 +27,18 @@ namespace beast = boost::beast;
 namespace http = beast::http;
 
 using tcp = asio::ip::tcp;
+
+inline std::string generate_request_id()
+{
+    static std::atomic<std::uint64_t> counter{0};
+
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+
+    std::ostringstream oss;
+    oss << std::hex << now << "-" << counter.fetch_add(1);
+
+    return oss.str();
+}
 
 class Session : public std::enable_shared_from_this<Session>
 {
@@ -49,6 +66,7 @@ private:
     bool backend_connected_ = false;
 
     std::string client_id_;
+    std::string request_id_;
 
     std::shared_ptr<Metrics> metrics_;
 
@@ -158,6 +176,10 @@ private:
             http::field::content_type,
             "text/plain");
 
+        error_response_.set(
+            "X-Request-ID",
+            request_id_);
+
         error_response_.body() =
             "Service Unavailable";
 
@@ -238,6 +260,26 @@ private:
                     return;
                 }
 
+                // Establish the request correlation ID.
+                //
+                // Preserve a client-provided X-Request-ID when present.
+                // Otherwise generate one for this request.
+                auto request_id_it = self->request_.find("X-Request-ID");
+
+                if (request_id_it != self->request_.end() &&
+                    !request_id_it->value().empty())
+                {
+                    self->request_id_ = std::string(request_id_it->value());
+                }
+                else
+                {
+                    self->request_id_ = generate_request_id();
+
+                    self->request_.set(
+                        "X-Request-ID",
+                        self->request_id_);
+                }
+
                 self->metrics_->record_request();
 
                 // Start measuring this HTTP request.
@@ -313,6 +355,10 @@ private:
         rate_limit_response_.set(
             http::field::content_type,
             "text/plain");
+
+        rate_limit_response_.set(
+            "X-Request-ID",
+            request_id_);
 
         rate_limit_response_.body() =
             "Too Many Requests";
@@ -612,6 +658,10 @@ private:
         // by the time the client receives the response.
         self->metrics_->record_response(
             backend_response_.result_int());
+
+        backend_response_.set(
+            "X-Request-ID",
+            request_id_);
 
         http::async_write(
             socket_,

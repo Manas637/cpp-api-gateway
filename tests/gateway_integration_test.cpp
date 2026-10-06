@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <cstdint>
+#include <mutex>
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -50,6 +51,11 @@ public:
         failing_.store(failing);
     }
 
+    std::string last_request_id() const
+    {
+        return last_request_id_;
+    }
+
 private:
     asio::io_context &io_context_;
     tcp::acceptor acceptor_;
@@ -57,6 +63,9 @@ private:
     std::string response_body_;
 
     std::atomic_bool failing_{false};
+
+    mutable std::mutex request_id_mutex_;
+    std::string last_request_id_;
 
     void accept()
     {
@@ -103,6 +112,24 @@ private:
                 if (ec)
                 {
                     return;
+                }
+
+                auto request_id_it =
+                    request->find("X-Request-ID");
+
+                {
+                    std::lock_guard<std::mutex> lock(
+                        request_id_mutex_);
+
+                    if (request_id_it != request->end())
+                    {
+                        last_request_id_ =
+                            std::string(request_id_it->value());
+                    }
+                    else
+                    {
+                        last_request_id_.clear();
+                    }
                 }
 
                 // Simulate upstream failure by closing the
@@ -172,9 +199,17 @@ private:
 // HTTP Client Helper
 // ============================================================
 
-std::string send_request(
+struct HttpTestResponse
+{
+    unsigned int status;
+    std::string body;
+    std::string request_id;
+};
+
+HttpTestResponse send_request(
     unsigned short gateway_port,
-    unsigned short expected_status = 200)
+    const std::string &request_id = "",
+    unsigned int expected_status = 200)
 {
     asio::io_context io_context;
 
@@ -199,10 +234,16 @@ std::string send_request(
         http::field::host,
         "localhost");
 
-    // Each test request uses a fresh client connection.
     request.set(
         http::field::connection,
         "close");
+
+    if (!request_id.empty())
+    {
+        request.set(
+            "X-Request-ID",
+            request_id);
+    }
 
     http::write(
         socket,
@@ -221,7 +262,21 @@ std::string send_request(
         response.result_int() ==
         expected_status);
 
-    return response.body();
+    HttpTestResponse result;
+
+    result.status = response.result_int();
+    result.body = response.body();
+
+    auto response_request_id =
+        response.find("X-Request-ID");
+
+    if (response_request_id != response.end())
+    {
+        result.request_id =
+            std::string(response_request_id->value());
+    }
+
+    return result;
 }
 
 void assert_metric(
@@ -371,15 +426,15 @@ int main()
     // ========================================================
 
     {
-        std::string response =
+        auto response =
             send_request(gateway_port);
 
-        assert(response == "backend A");
+        assert(response.body == "backend A");
 
         response =
             send_request(gateway_port);
 
-        assert(response == "backend B");
+        assert(response.body == "backend B");
 
         assert_metric(
             *metrics,
@@ -398,23 +453,102 @@ int main()
 
     // ========================================================
     // TEST 2
+    // Request ID propagation
+    // ========================================================
+
+    {
+        const std::string supplied_request_id =
+            "test-request-123";
+
+        auto response =
+            send_request(
+                gateway_port,
+                supplied_request_id);
+
+        assert(
+            response.status == 200);
+
+        assert(
+            response.body == "backend B" ||
+            response.body == "backend A");
+
+        // Gateway preserves the client-provided ID.
+        assert(
+            response.request_id ==
+            supplied_request_id);
+
+        // The same ID must reach the backend.
+        if (response.body == "backend A")
+        {
+            assert(
+                backend_a.last_request_id() ==
+                supplied_request_id);
+        }
+        else
+        {
+            assert(
+                backend_b.last_request_id() ==
+                supplied_request_id);
+        }
+
+        std::cout
+            << "[PASS] supplied request ID propagation\n";
+    }
+
+    // ========================================================
+    // TEST 3
+    // Request ID generation
+    // ========================================================
+
+    {
+        auto response =
+            send_request(gateway_port);
+
+        // Gateway must generate an ID when
+        // the client does not provide one.
+        assert(
+            !response.request_id.empty());
+
+        // The generated ID must reach the backend.
+        if (response.body == "backend A")
+        {
+            assert(
+                backend_a.last_request_id() ==
+                response.request_id);
+        }
+        else
+        {
+            assert(
+                response.body == "backend B");
+
+            assert(
+                backend_b.last_request_id() ==
+                response.request_id);
+        }
+
+        std::cout
+            << "[PASS] generated request ID propagation\n";
+    }
+
+    // ========================================================
+    // TEST 4
     // Backend A failure -> failover to B
     // ========================================================
 
     backend_a.set_failing(true);
 
     {
-        std::string response =
+        auto response =
             send_request(gateway_port);
 
         // A fails, gateway retries B.
-        assert(response == "backend B");
+        assert(response.body == "backend B");
 
         assert_metric(
             *metrics,
-            3,
-            4,
-            3,
+            5,
+            6,
+            5,
             1,
             1,
             0,
@@ -426,7 +560,7 @@ int main()
     }
 
     // ========================================================
-    // TEST 3
+    // TEST 5
     // Repeated A failures -> circuit OPEN
     // ========================================================
 
@@ -435,11 +569,11 @@ int main()
              i < failure_threshold;
              ++i)
         {
-            std::string response =
+            auto response =
                 send_request(gateway_port);
 
             // A fails and B handles the retry.
-            assert(response == "backend B");
+            assert(response.body == "backend B");
         }
 
         Backend &backend_a_state =
@@ -450,9 +584,9 @@ int main()
 
         assert_metric(
             *metrics,
-            8,
-            13,
-            8,
+            10,
+            15,
+            10,
             5,
             5,
             1,
@@ -464,16 +598,16 @@ int main()
     }
 
     // ========================================================
-    // TEST 4
+    // TEST 6
     // OPEN backend is skipped
     // ========================================================
 
     {
-        std::string response =
+        auto response =
             send_request(gateway_port);
 
         // A is OPEN, so load balancer skips it.
-        assert(response == "backend B");
+        assert(response.body == "backend B");
 
         Backend &backend_a_state =
             load_balancer->backends()[0];
@@ -483,9 +617,9 @@ int main()
 
         assert_metric(
             *metrics,
-            9,
-            14,
-            9,
+            11,
+            16,
+            11,
             5,
             5,
             1,
@@ -497,7 +631,7 @@ int main()
     }
 
     // ========================================================
-    // TEST 5
+    // TEST 7
     // OPEN -> HALF_OPEN -> CLOSED recovery
     // ========================================================
 
@@ -528,10 +662,10 @@ int main()
         //
         // HALF_OPEN -> CLOSED
 
-        std::string response =
+        auto response =
             send_request(gateway_port);
 
-        assert(response == "backend A");
+        assert(response.body == "backend A");
 
         assert(
             backend_a_state.circuit_breaker.state() == CircuitBreaker::State::CLOSED);
@@ -541,9 +675,9 @@ int main()
 
         assert_metric(
             *metrics,
-            10,
-            15,
-            10,
+            12,
+            17,
+            12,
             5,
             5,
             1,
@@ -555,18 +689,18 @@ int main()
     }
 
     // ========================================================
-    // TEST 6
+    // TEST 8
     // Recovered backend works normally
     // ========================================================
 
     {
-        std::string response =
+        auto response =
             send_request(gateway_port);
 
         // Both backends are healthy again.
         assert(
-            response == "backend A" ||
-            response == "backend B");
+            response.body == "backend A" ||
+            response.body == "backend B");
 
         Backend &backend_a_state =
             load_balancer->backends()[0];
@@ -576,9 +710,9 @@ int main()
 
         assert_metric(
             *metrics,
-            11,
-            16,
-            11,
+            13,
+            18,
+            13,
             5,
             5,
             1,
