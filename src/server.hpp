@@ -21,6 +21,7 @@
 #include "rate_limiter.hpp"
 #include "metrics.hpp"
 #include "status_handler.hpp"
+#include "logger.hpp"
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -122,6 +123,17 @@ private:
             static_cast<std::uint64_t>(duration.count()));
     }
 
+    std::string selected_backend_name() const
+    {
+        if (selected_backend_ == nullptr)
+        {
+            return "";
+        }
+
+        return selected_backend_->host + ":" +
+               std::to_string(selected_backend_->port);
+    }
+
     // -------------------------------------------------------------------------
     // Connection lifecycle metrics
     // -------------------------------------------------------------------------
@@ -195,10 +207,11 @@ private:
             {
                 if (ec)
                 {
-                    std::cerr
-                        << "503 response error: "
-                        << ec.message()
-                        << '\n';
+                    Logger::log(
+                        LogLevel::ERR,
+                        "service_unavailable_response_failed",
+                        ec.message(),
+                        self->request_id_);
 
                     self->close_client_connection();
                     return;
@@ -235,10 +248,11 @@ private:
 
                 if (ec)
                 {
-                    std::cerr
-                        << "Read error: "
-                        << ec.message()
-                        << '\n';
+                    Logger::log(
+                        LogLevel::ERR,
+                        "client_read_failed",
+                        ec.message(),
+                        self->request_id_);
 
                     self->close_client_connection();
                     return;
@@ -287,6 +301,12 @@ private:
                 self->request_started_at_ =
                     std::chrono::steady_clock::now();
 
+                Logger::log(
+                    LogLevel::INFO,
+                    "request_started",
+                    "",
+                    self->request_id_);
+
                 beast::error_code endpoint_ec;
 
                 auto endpoint =
@@ -294,10 +314,11 @@ private:
 
                 if (endpoint_ec)
                 {
-                    std::cerr
-                        << "Client endpoint error: "
-                        << endpoint_ec.message()
-                        << '\n';
+                    Logger::log(
+                        LogLevel::ERR,
+                        "client_endpoint_failed",
+                        endpoint_ec.message(),
+                        self->request_id_);
 
                     self->close_client_connection();
                     return;
@@ -332,6 +353,12 @@ private:
                 if (!allowed)
                 {
                     self->metrics_->record_rate_limit_rejected();
+
+                    Logger::log(
+                        LogLevel::WARN,
+                        "rate_limit_rejected",
+                        "request rejected by rate limiter",
+                        self->request_id_);
 
                     self->send_rate_limit_response();
                     return;
@@ -377,10 +404,11 @@ private:
             {
                 if (ec)
                 {
-                    std::cerr
-                        << "Rate limit response error: "
-                        << ec.message()
-                        << '\n';
+                    Logger::log(
+                        LogLevel::ERR,
+                        "rate_limit_response_failed",
+                        ec.message(),
+                        self->request_id_);
 
                     self->close_client_connection();
                     return;
@@ -427,13 +455,22 @@ private:
             {
                 metrics_->record_failover();
             }
+
+            Logger::log(
+                LogLevel::INFO,
+                "backend_selected",
+                "",
+                request_id_,
+                selected_backend_->host + ":" +
+                    std::to_string(selected_backend_->port));
         }
         catch (const std::runtime_error &e)
         {
-            std::cerr
-                << "No backend available: "
-                << e.what()
-                << '\n';
+            Logger::log(
+                LogLevel::ERR,
+                "no_backend_available",
+                e.what(),
+                request_id_);
 
             send_service_unavailable();
             return;
@@ -451,10 +488,12 @@ private:
             {
                 if (ec)
                 {
-                    std::cerr
-                        << "Backend resolve error: "
-                        << ec.message()
-                        << '\n';
+                    Logger::log(
+                        LogLevel::ERR,
+                        "backend_resolve_failed",
+                        ec.message(),
+                        self->request_id_,
+                        self->selected_backend_name());
 
                     self->metrics_->record_backend_failure();
 
@@ -486,10 +525,12 @@ private:
                     {
                         if (ec)
                         {
-                            std::cerr
-                                << "Backend connection error: "
-                                << ec.message()
-                                << '\n';
+                            Logger::log(
+                                LogLevel::ERR,
+                                "backend_connection_failed",
+                                ec.message(),
+                                self->request_id_,
+                                self->selected_backend_name());
 
                             self->metrics_->record_backend_failure();
 
@@ -543,10 +584,12 @@ private:
             {
                 if (ec)
                 {
-                    std::cerr
-                        << "Backend write error: "
-                        << ec.message()
-                        << '\n';
+                    Logger::log(
+                        LogLevel::ERR,
+                        "backend_write_failed",
+                        ec.message(),
+                        self->request_id_,
+                        self->selected_backend_name());
 
                     self->metrics_->record_backend_failure();
 
@@ -596,10 +639,12 @@ private:
             {
                 if (ec)
                 {
-                    std::cerr
-                        << "Backend read error: "
-                        << ec.message()
-                        << '\n';
+                    Logger::log(
+                        LogLevel::ERR,
+                        "backend_read_failed",
+                        ec.message(),
+                        self->request_id_,
+                        self->selected_backend_name());
 
                     self->metrics_->record_backend_failure();
 
@@ -673,10 +718,11 @@ private:
             {
                 if (ec)
                 {
-                    std::cerr
-                        << "Client write error: "
-                        << ec.message()
-                        << '\n';
+                    Logger::log(
+                        LogLevel::ERR,
+                        "client_write_failed",
+                        ec.message(),
+                        self->request_id_);
 
                     self->close_client_connection();
                     return;
@@ -685,6 +731,12 @@ private:
                 // The complete response has been successfully written
                 // to the client. Record end-to-end request latency.
                 self->record_request_duration();
+
+                Logger::log(
+                    LogLevel::INFO,
+                    "request_completed",
+                    "request completed successfully",
+                    self->request_id_);
 
                 self->request_ = {};
                 self->backend_response_ = {};
@@ -732,10 +784,10 @@ private:
             {
                 if (ec)
                 {
-                    std::cerr
-                        << "Metrics response error: "
-                        << ec.message()
-                        << '\n';
+                    Logger::log(
+                        LogLevel::ERR,
+                        "metrics_response_failed",
+                        ec.message());
 
                     self->close_client_connection();
                     return;
@@ -784,10 +836,10 @@ private:
             {
                 if (ec)
                 {
-                    std::cerr
-                        << "Status response error: "
-                        << ec.message()
-                        << '\n';
+                    Logger::log(
+                        LogLevel::ERR,
+                        "status_response_failed",
+                        ec.message());
 
                     self->close_client_connection();
                     return;
@@ -866,10 +918,10 @@ private:
                     return;
                 }
 
-                std::cerr
-                    << "Accept error: "
-                    << ec.message()
-                    << '\n';
+                Logger::log(
+                    LogLevel::ERR,
+                    "accept_failed",
+                    ec.message());
 
                 accept();
             });
