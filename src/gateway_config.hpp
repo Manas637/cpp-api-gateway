@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -17,4 +18,8 @@ struct GatewayConfig
 
     std::string redis_host = "127.0.0.1";
     std::string redis_port = "6379";
+
+    std::chrono::milliseconds backend_connect_timeout{2000};
+    std::chrono::milliseconds backend_response_timeout{5000};
+    std::chrono::milliseconds request_timeout{10000};
 };

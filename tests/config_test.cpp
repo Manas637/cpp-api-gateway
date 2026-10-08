@@ -2,6 +2,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <chrono>
 
 #include "config.hpp"
 
@@ -42,6 +43,9 @@ namespace
         unset_env("RATE_LIMIT_REFILL_RATE");
         unset_env("REDIS_HOST");
         unset_env("REDIS_PORT");
+        unset_env("BACKEND_CONNECT_TIMEOUT_MS");
+        unset_env("BACKEND_RESPONSE_TIMEOUT_MS");
+        unset_env("REQUEST_TIMEOUT_MS");
     }
 
     void expect(bool condition, const std::string &message)
@@ -96,6 +100,21 @@ int main()
 
             expect(config.redis_port == "6379",
                    "Default Redis port is incorrect");
+
+            expect(
+                config.backend_connect_timeout ==
+                    std::chrono::milliseconds(2000),
+                "Default backend connect timeout is incorrect");
+
+            expect(
+                config.backend_response_timeout ==
+                    std::chrono::milliseconds(5000),
+                "Default backend response timeout is incorrect");
+
+            expect(
+                config.request_timeout ==
+                    std::chrono::milliseconds(10000),
+                "Default request timeout is incorrect");
         }
 
         // -------------------------------------------------
@@ -280,6 +299,60 @@ int main()
 
             expect(threw,
                    "Backend port out of range was not rejected");
+
+            clear_config_environment();
+        }
+
+        // -------------------------------------------------
+        // Test 9: Custom timeout configuration
+        // -------------------------------------------------
+
+        {
+            set_env("BACKEND_CONNECT_TIMEOUT_MS", "1500");
+            set_env("BACKEND_RESPONSE_TIMEOUT_MS", "7500");
+            set_env("REQUEST_TIMEOUT_MS", "12000");
+
+            GatewayConfig config = load_config();
+
+            expect(
+                config.backend_connect_timeout ==
+                    std::chrono::milliseconds(1500),
+                "Custom backend connect timeout is incorrect");
+
+            expect(
+                config.backend_response_timeout ==
+                    std::chrono::milliseconds(7500),
+                "Custom backend response timeout is incorrect");
+
+            expect(
+                config.request_timeout ==
+                    std::chrono::milliseconds(12000),
+                "Custom request timeout is incorrect");
+
+            clear_config_environment();
+        }
+
+        // -------------------------------------------------
+        // Test 10: Invalid timeout configuration
+        // -------------------------------------------------
+
+        {
+            set_env("BACKEND_RESPONSE_TIMEOUT_MS", "-500");
+
+            bool threw = false;
+
+            try
+            {
+                load_config();
+            }
+            catch (const std::exception &)
+            {
+                threw = true;
+            }
+
+            expect(
+                threw,
+                "Invalid backend response timeout was not rejected");
 
             clear_config_environment();
         }

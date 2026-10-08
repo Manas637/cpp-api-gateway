@@ -51,6 +51,9 @@ private:
 
     tcp::resolver resolver_;
     tcp::socket backend_socket_;
+    asio::steady_timer backend_response_timer_;
+    std::chrono::milliseconds backend_response_timeout_;
+    bool backend_response_timeout_triggered_ = false;
 
     beast::flat_buffer backend_buffer_;
     http::response<http::string_body> backend_response_;
@@ -85,14 +88,17 @@ public:
         std::shared_ptr<LoadBalancer> load_balancer,
         std::shared_ptr<RateLimiter> rate_limiter,
         std::shared_ptr<Metrics> metrics,
-        bool rate_limiting_enabled)
+        bool rate_limiting_enabled,
+        std::chrono::milliseconds backend_response_timeout)
         : socket_(std::move(socket)),
           resolver_(socket_.get_executor()),
           backend_socket_(socket_.get_executor()),
+          backend_response_timer_(socket_.get_executor()),
           load_balancer_(std::move(load_balancer)),
           rate_limiter_(std::move(rate_limiter)),
           metrics_(std::move(metrics)),
-          rate_limiting_enabled_(rate_limiting_enabled)
+          rate_limiting_enabled_(rate_limiting_enabled),
+          backend_response_timeout_(backend_response_timeout)
     {
     }
 
@@ -108,6 +114,49 @@ public:
     }
 
 private:
+    void start_backend_response_timer()
+    {
+        auto self = shared_from_this();
+
+        backend_response_timeout_triggered_ = false;
+
+        backend_response_timer_.expires_after(
+            backend_response_timeout_);
+
+        backend_response_timer_.async_wait(
+            [self](beast::error_code ec)
+            {
+                if (ec == asio::error::operation_aborted)
+                {
+                    return;
+                }
+
+                if (ec)
+                {
+                    Logger::log(
+                        LogLevel::ERR,
+                        "backend_response_timer_failed",
+                        ec.message(),
+                        self->request_id_,
+                        self->selected_backend_name());
+
+                    return;
+                }
+
+                self->backend_response_timeout_triggered_ = true;
+
+                Logger::log(
+                    LogLevel::WARN,
+                    "backend_response_timeout",
+                    "backend response timed out",
+                    self->request_id_,
+                    self->selected_backend_name());
+
+                beast::error_code close_ec;
+
+                self->backend_socket_.close(close_ec);
+            });
+    }
     // -------------------------------------------------------------------------
     // Request latency metrics
     // -------------------------------------------------------------------------
@@ -620,6 +669,23 @@ private:
             });
     }
 
+    void handle_backend_response_timeout()
+    {
+        metrics_->record_backend_failure();
+
+        auto transition =
+            selected_backend_->circuit_breaker.record_failure();
+
+        if (transition == CircuitBreaker::Transition::OPENED)
+        {
+            metrics_->record_circuit_open();
+        }
+
+        backend_connected_ = false;
+
+        connect_to_backend();
+    }
+
     // -------------------------------------------------------------------------
     // Backend response
     // -------------------------------------------------------------------------
@@ -627,6 +693,8 @@ private:
     void read_from_backend()
     {
         auto self = shared_from_this();
+
+        start_backend_response_timer();
 
         http::async_read(
             backend_socket_,
@@ -637,6 +705,19 @@ private:
                 beast::error_code ec,
                 std::size_t)
             {
+                if (!ec)
+                {
+                    self->backend_response_timer_.cancel();
+                }
+                if (ec == asio::error::operation_aborted &&
+                    self->backend_response_timeout_triggered_)
+                {
+                    self->backend_response_timeout_triggered_ = false;
+
+                    self->handle_backend_response_timeout();
+
+                    return;
+                }
                 if (ec)
                 {
                     Logger::log(
@@ -867,6 +948,8 @@ private:
 
     std::shared_ptr<Metrics> metrics_;
 
+    std::chrono::milliseconds backend_response_timeout_;
+
 public:
     Server(
         asio::io_context &io_context,
@@ -882,7 +965,8 @@ public:
           load_balancer_(std::move(load_balancer)),
           rate_limiter_(std::move(rate_limiter)),
           metrics_(std::move(metrics)),
-          rate_limiting_enabled_(rate_limiting_enabled)
+          rate_limiting_enabled_(rate_limiting_enabled),
+          backend_response_timeout_(config.backend_response_timeout)
     {
         accept();
     }
@@ -902,7 +986,8 @@ private:
                         load_balancer_,
                         rate_limiter_,
                         metrics_,
-                        rate_limiting_enabled_)
+                        rate_limiting_enabled_,
+                        backend_response_timeout_)
                         ->start();
 
                     accept();

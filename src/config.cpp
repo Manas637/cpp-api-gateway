@@ -172,6 +172,36 @@ namespace
 
         return parse_backends(value);
     }
+
+    std::chrono::milliseconds get_duration_ms(
+        const char *name,
+        std::chrono::milliseconds default_value)
+    {
+        const char *value = std::getenv(name);
+
+        if (value == nullptr || *value == '\0')
+        {
+            return default_value;
+        }
+
+        try
+        {
+            const long long milliseconds = std::stoll(value);
+
+            if (milliseconds <= 0)
+            {
+                throw std::runtime_error(
+                    std::string(name) + " must be positive");
+            }
+
+            return std::chrono::milliseconds(milliseconds);
+        }
+        catch (const std::exception &)
+        {
+            throw std::runtime_error(
+                std::string("Invalid value for ") + name);
+        }
+    }
 }
 
 GatewayConfig load_config()
@@ -207,6 +237,21 @@ GatewayConfig load_config()
         get_string(
             "REDIS_PORT",
             config.redis_port);
+
+    config.backend_connect_timeout =
+        get_duration_ms(
+            "BACKEND_CONNECT_TIMEOUT_MS",
+            std::chrono::milliseconds(2000));
+
+    config.backend_response_timeout =
+        get_duration_ms(
+            "BACKEND_RESPONSE_TIMEOUT_MS",
+            std::chrono::milliseconds(5000));
+
+    config.request_timeout =
+        get_duration_ms(
+            "REQUEST_TIMEOUT_MS",
+            std::chrono::milliseconds(10000));
 
     return config;
 }

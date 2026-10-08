@@ -38,10 +38,10 @@ public:
         unsigned short port,
         std::string response_body)
         : io_context_(io_context),
-          acceptor_(
-              io_context,
-              tcp::endpoint(tcp::v4(), port)),
-          response_body_(std::move(response_body))
+            acceptor_(
+                io_context,
+                tcp::endpoint(tcp::v4(), port)),
+            response_body_(std::move(response_body))
     {
         accept();
     }
@@ -49,6 +49,12 @@ public:
     void set_failing(bool failing)
     {
         failing_.store(failing);
+    }
+
+    void set_response_delay(
+        std::chrono::milliseconds delay)
+    {
+        response_delay_ = delay;
     }
 
     std::string last_request_id() const
@@ -63,6 +69,7 @@ private:
     std::string response_body_;
 
     std::atomic_bool failing_{false};
+    std::chrono::milliseconds response_delay_{0};
 
     mutable std::mutex request_id_mutex_;
     std::string last_request_id_;
@@ -100,12 +107,16 @@ private:
             std::make_shared<
                 http::request<http::string_body>>();
 
+        auto response_timer =
+            std::make_shared<asio::steady_timer>(
+                io_context_);
+
         http::async_read(
             *socket_ptr,
             *buffer,
             *request,
 
-            [this, socket_ptr, buffer, request](
+            [this, socket_ptr, buffer, request, response_timer](
                 beast::error_code ec,
                 std::size_t)
             {
@@ -174,23 +185,57 @@ private:
                     http::field::connection,
                     "close");
 
-                http::async_write(
-                    *socket_ptr,
-                    *response,
+                if (response_delay_.count() > 0)
+                {
+                    response_timer->expires_after(
+                        response_delay_);
 
-                    [socket_ptr, response](
-                        beast::error_code,
-                        std::size_t)
-                    {
-                        beast::error_code shutdown_ec;
+                    response_timer->async_wait(
+                        [socket_ptr, response, response_timer](
+                            beast::error_code ec)
+                        {
+                            if (ec)
+                            {
+                                return;
+                            }
 
-                        socket_ptr->shutdown(
-                            tcp::socket::shutdown_both,
-                            shutdown_ec);
+                            http::async_write(
+                                *socket_ptr,
+                                *response,
+                                [socket_ptr, response](
+                                    beast::error_code,
+                                    std::size_t)
+                                {
+                                    beast::error_code shutdown_ec;
 
-                        socket_ptr->close(
-                            shutdown_ec);
-                    });
+                                    socket_ptr->shutdown(
+                                        tcp::socket::shutdown_both,
+                                        shutdown_ec);
+
+                                    socket_ptr->close(
+                                        shutdown_ec);
+                                });
+                        });
+                }
+                else
+                {
+                    http::async_write(
+                        *socket_ptr,
+                        *response,
+                        [socket_ptr, response](
+                            beast::error_code,
+                            std::size_t)
+                        {
+                            beast::error_code shutdown_ec;
+
+                            socket_ptr->shutdown(
+                                tcp::socket::shutdown_both,
+                                shutdown_ec);
+
+                            socket_ptr->close(
+                                shutdown_ec);
+                        });
+                }
             });
     }
 };
@@ -396,6 +441,9 @@ int main()
     config.rate_limit_capacity = 1000.0;
 
     config.rate_limit_refill_rate = 1000.0;
+
+    config.backend_response_timeout =
+        std::chrono::milliseconds(100);
 
     // ========================================================
     // Gateway Server
@@ -722,6 +770,50 @@ int main()
         std::cout
             << "[PASS] recovered backend participates normally\n";
     }
+
+    // ============================================================
+    // TEST 9
+    // Backend response timeout -> failover
+    // ============================================================
+
+    backend_a.set_failing(false);
+    backend_b.set_failing(false);
+
+    backend_a.set_response_delay(
+        std::chrono::milliseconds(500));
+
+    backend_b.set_response_delay(
+        std::chrono::milliseconds(0));
+
+    {
+        const auto backend_failures_before =
+            metrics->backend_failures_total();
+
+        const auto failovers_before =
+            metrics->failovers_total();
+
+        auto response =
+            send_request(gateway_port);
+
+        // Backend A exceeds the gateway's 100 ms
+        // response timeout, so the gateway must fail over to B.
+        assert(response.status == 200);
+        assert(response.body == "backend B");
+
+        assert(
+            metrics->backend_failures_total() ==
+            backend_failures_before + 1);
+
+        assert(
+            metrics->failovers_total() ==
+            failovers_before + 1);
+
+        std::cout
+            << "[PASS] backend response timeout triggers failover\n";
+    }
+
+    backend_a.set_response_delay(
+        std::chrono::milliseconds(0));
 
     // ========================================================
     // Cleanup
