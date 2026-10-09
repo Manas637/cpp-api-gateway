@@ -72,6 +72,12 @@ private:
     bool backend_connected_ = false;
     std::size_t retry_count_ = 0;
 
+    // True while this session holds exactly one in_flight_requests
+    // count on selected_backend_. The ownership flag makes acquire and
+    // release idempotent, preventing leaks, double-decrements, and
+    // underflow.
+    bool backend_in_flight_counted_ = false;
+
     std::string client_id_;
     std::string request_id_;
 
@@ -107,6 +113,11 @@ public:
 
     ~Session()
     {
+        // If the session is torn down while a backend attempt is still
+        // in flight (e.g. the io_context is stopped during shutdown),
+        // return the slot so the backend in-flight accounting never
+        // leaks. This is a no-op when no slot was acquired.
+        release_backend_slot();
         mark_connection_closed();
     }
 
@@ -223,6 +234,40 @@ private:
         connection_tracked_ = false;
 
         metrics_->connection_closed();
+    }
+
+    // -------------------------------------------------------------------------
+    // Backend in-flight request accounting
+    // -------------------------------------------------------------------------
+
+    // Idempotent: each session holds at most one count on the backend
+    // it is currently using.
+    void acquire_backend_slot()
+    {
+        if (backend_in_flight_counted_ || selected_backend_ == nullptr)
+        {
+            return;
+        }
+
+        backend_in_flight_counted_ = true;
+
+        selected_backend_->in_flight_requests.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+
+    // Idempotent: a slot is only ever released if this session holds
+    // one, so repeated or stale calls cannot underflow the counter.
+    void release_backend_slot()
+    {
+        if (!backend_in_flight_counted_ || selected_backend_ == nullptr)
+        {
+            return;
+        }
+
+        backend_in_flight_counted_ = false;
+
+        selected_backend_->in_flight_requests.fetch_sub(
+            1, std::memory_order_relaxed);
     }
 
     void close_client_connection()
@@ -564,6 +609,12 @@ private:
             return;
         }
 
+        // A different backend is about to be selected (fresh attempt or
+        // retry). Drop any slot still held for the previous backend
+        // before the pointer changes so the count is never attributed
+        // to the wrong backend.
+        release_backend_slot();
+
         try
         {
             Backend *previous_backend = selected_backend_;
@@ -573,6 +624,11 @@ private:
 
             selected_backend_ =
                 &load_balancer_->next(&transition, excluded_backend);
+
+            // Acquire immediately so resolve/connect time counts as an
+            // in-flight request. send_to_backend() re-acquires
+            // idempotently for the keep-alive reuse path.
+            acquire_backend_slot();
 
             if (transition ==
                 CircuitBreaker::Transition::HALF_OPENED)
@@ -618,6 +674,8 @@ private:
             {
                 if (ec)
                 {
+                    self->release_backend_slot();
+
                     Logger::log(
                         LogLevel::ERR,
                         "backend_resolve_failed",
@@ -659,6 +717,8 @@ private:
                     {
                         if (ec)
                         {
+                            self->release_backend_slot();
+
                             Logger::log(
                                 LogLevel::ERR,
                                 "backend_connection_failed",
@@ -710,6 +770,12 @@ private:
     {
         auto self = shared_from_this();
 
+        // Covers the keep-alive reuse path, where connect_to_backend()
+        // writes to the already-connected backend without reselection.
+        // On the fresh-connection path this is a no-op because the slot
+        // was already acquired at selection.
+        acquire_backend_slot();
+
         self->metrics_->record_backend_request();
 
         http::async_write(
@@ -722,6 +788,8 @@ private:
             {
                 if (ec)
                 {
+                    self->release_backend_slot();
+
                     Logger::log(
                         LogLevel::ERR,
                         "backend_write_failed",
@@ -764,6 +832,8 @@ private:
 
     void handle_backend_response_timeout()
     {
+        release_backend_slot();
+
         metrics_->record_backend_failure();
 
         auto transition =
@@ -828,6 +898,8 @@ private:
 
                 if (ec)
                 {
+                    self->release_backend_slot();
+
                     Logger::log(
                         LogLevel::ERR,
                         "backend_read_failed",
@@ -905,6 +977,11 @@ private:
                 beast::error_code ec,
                 std::size_t)
             {
+                // The backend response is complete, so the backend
+                // attempt is finished whether or not the client write
+                // succeeded.
+                self->release_backend_slot();
+
                 if (ec)
                 {
                     Logger::log(

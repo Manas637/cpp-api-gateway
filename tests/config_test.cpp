@@ -38,6 +38,7 @@ namespace
     {
         unset_env("GATEWAY_PORT");
         unset_env("BACKENDS");
+        unset_env("LOAD_BALANCING_STRATEGY");
         unset_env("RATE_LIMITING_ENABLED");
         unset_env("RATE_LIMIT_CAPACITY");
         unset_env("RATE_LIMIT_REFILL_RATE");
@@ -85,6 +86,11 @@ int main()
             expect(config.backends[2].host == "127.0.0.1" &&
                        config.backends[2].port == 9003,
                    "Default backend 3 is incorrect");
+
+            expect(
+                config.load_balancing_strategy ==
+                    LoadBalancingStrategy::ROUND_ROBIN,
+                "Default load balancing strategy is incorrect");
 
             expect(config.rate_limiting_enabled,
                    "Default rate limiting state is incorrect");
@@ -353,6 +359,65 @@ int main()
             expect(
                 threw,
                 "Invalid backend response timeout was not rejected");
+
+            clear_config_environment();
+        }
+
+        // -------------------------------------------------
+        // Test 11: Round-robin strategy
+        // -------------------------------------------------
+
+        {
+            set_env("LOAD_BALANCING_STRATEGY", "ROUND_ROBIN");
+
+            GatewayConfig config = load_config();
+
+            expect(
+                config.load_balancing_strategy ==
+                    LoadBalancingStrategy::ROUND_ROBIN,
+                "ROUND_ROBIN strategy was not applied");
+
+            clear_config_environment();
+        }
+
+        // -------------------------------------------------
+        // Test 12: Least-connections strategy
+        // -------------------------------------------------
+
+        {
+            set_env("LOAD_BALANCING_STRATEGY", "LEAST_CONNECTIONS");
+
+            GatewayConfig config = load_config();
+
+            expect(
+                config.load_balancing_strategy ==
+                    LoadBalancingStrategy::LEAST_CONNECTIONS,
+                "LEAST_CONNECTIONS strategy was not applied");
+
+            clear_config_environment();
+        }
+
+        // -------------------------------------------------
+        // Test 13: Invalid load-balancing strategy
+        // -------------------------------------------------
+
+        {
+            set_env("LOAD_BALANCING_STRATEGY", "WEIGHTED");
+
+            bool threw = false;
+
+            try
+            {
+                load_config();
+            }
+            catch (const std::exception &)
+            {
+                threw = true;
+            }
+
+            expect(
+                threw,
+                "Invalid load-balancing strategy was not rejected");
 
             clear_config_environment();
         }

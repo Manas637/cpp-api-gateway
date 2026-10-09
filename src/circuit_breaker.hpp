@@ -69,6 +69,17 @@ public:
         return false;
     }
 
+    // Non-mutating check: true when the circuit is OPEN and its
+    // cooldown has elapsed, so the next allow_request() would start
+    // the single HALF_OPEN probe. Unlike allow_request(), this does
+    // not consume that probe.
+    bool is_open_and_ready(
+        TimePoint now = Clock::now()) const
+    {
+        return state_ == State::OPEN &&
+               now - opened_at_ >= open_duration_;
+    }
+
     Transition record_success()
     {
         if (state_ == State::HALF_OPEN)

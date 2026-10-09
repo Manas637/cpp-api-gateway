@@ -40,6 +40,9 @@ int main()
             std::make_shared<LoadBalancer>(
                 config.backends);
 
+        load_balancer->set_strategy(
+            config.load_balancing_strategy);
+
         auto health_checker =
             std::make_shared<HealthChecker>(
                 io_context,

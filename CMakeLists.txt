@@ -268,6 +268,36 @@ add_test(
 )
 
 # -------------------------
+# Session Teardown
+# Accounting Test
+# -------------------------
+
+add_executable(session_teardown_test
+    tests/session_teardown_test.cpp
+    src/rate_limiter.cpp
+    src/in_memory_rate_limit_store.cpp
+    src/metrics.cpp
+)
+
+target_include_directories(session_teardown_test
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(session_teardown_test
+    PRIVATE
+    Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ws2_32
+    mswsock
+)
+
+add_test(
+    NAME SessionTeardownTest
+    COMMAND session_teardown_test
+)
+
+# -------------------------
 # Rate Limit Metrics
 # Integration Test
 # -------------------------

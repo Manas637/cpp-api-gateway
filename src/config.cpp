@@ -202,6 +202,33 @@ namespace
                 std::string("Invalid value for ") + name);
         }
     }
+
+    LoadBalancingStrategy get_strategy(
+        const char *name,
+        LoadBalancingStrategy default_value)
+    {
+        const char *value = std::getenv(name);
+
+        if (value == nullptr)
+        {
+            return default_value;
+        }
+
+        const std::string strategy(value);
+
+        if (strategy == "ROUND_ROBIN")
+        {
+            return LoadBalancingStrategy::ROUND_ROBIN;
+        }
+
+        if (strategy == "LEAST_CONNECTIONS")
+        {
+            return LoadBalancingStrategy::LEAST_CONNECTIONS;
+        }
+
+        throw std::runtime_error(
+            std::string("Invalid value for ") + name);
+    }
 }
 
 GatewayConfig load_config()
@@ -212,6 +239,11 @@ GatewayConfig load_config()
         get_port("GATEWAY_PORT", config.port);
 
     config.backends = get_backends();
+
+    config.load_balancing_strategy =
+        get_strategy(
+            "LOAD_BALANCING_STRATEGY",
+            LoadBalancingStrategy::ROUND_ROBIN);
 
     config.rate_limiting_enabled =
         get_bool(

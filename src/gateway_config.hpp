@@ -5,10 +5,14 @@
 #include <vector>
 
 #include "backend.hpp"
+#include "load_balancer.hpp"
 
 struct GatewayConfig
 {
     unsigned short port = 8080;
+
+    LoadBalancingStrategy load_balancing_strategy =
+        LoadBalancingStrategy::ROUND_ROBIN;
 
     std::vector<Backend> backends;
 

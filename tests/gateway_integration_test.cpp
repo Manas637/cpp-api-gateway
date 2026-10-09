@@ -374,6 +374,49 @@ void assert_metric(
 }
 
 // ============================================================
+// In-flight accounting helper
+// ============================================================
+
+// Poll until every backend reports the expected in-flight count.
+// The gateway releases the slot in an async write callback, so a short
+// poll avoids racing the client response.
+void wait_for_in_flight(
+    const LoadBalancer &load_balancer,
+    std::size_t expected,
+    std::chrono::milliseconds timeout =
+        std::chrono::milliseconds(1000))
+{
+    const auto deadline =
+        std::chrono::steady_clock::now() + timeout;
+
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        bool all_match = true;
+
+        for (const auto &backend : load_balancer.backends())
+        {
+            if (backend.in_flight_requests.load() != expected)
+            {
+                all_match = false;
+                break;
+            }
+        }
+
+        if (all_match)
+        {
+            return;
+        }
+
+        std::this_thread::yield();
+    }
+
+    for (const auto &backend : load_balancer.backends())
+    {
+        assert(backend.in_flight_requests.load() == expected);
+    }
+}
+
+// ============================================================
 // Main Integration Test
 // ============================================================
 
@@ -986,6 +1029,316 @@ int main()
         std::cout
             << "[PASS] retry excludes failed backend when "
                "no alternative is eligible\n";
+    }
+
+    // ========================================================
+    // In-flight accounting test helpers
+    // ========================================================
+
+    // Mutate shared LoadBalancer state on the I/O thread to avoid
+    // racing with LoadBalancer::next().
+    auto set_backend_healthy =
+        [&](std::size_t index, bool healthy)
+    {
+        std::promise<void> updated;
+        auto done = updated.get_future();
+
+        asio::post(
+            io_context,
+            [&load_balancer, &updated, index, healthy]()
+            {
+                load_balancer->backends()[index].healthy = healthy;
+                updated.set_value();
+            });
+
+        done.wait();
+    };
+
+    auto set_strategy =
+        [&](LoadBalancingStrategy strategy)
+    {
+        std::promise<void> updated;
+        auto done = updated.get_future();
+
+        asio::post(
+            io_context,
+            [&load_balancer, &updated, strategy]()
+            {
+                load_balancer->set_strategy(strategy);
+                updated.set_value();
+            });
+
+        done.wait();
+    };
+
+    auto wait_for_backend_in_flight =
+        [&](std::size_t index, std::size_t expected)
+    {
+        const auto deadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(1000);
+
+        while (load_balancer->backends()[index]
+                       .in_flight_requests.load() != expected &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::yield();
+        }
+
+        assert(
+            load_balancer->backends()[index]
+                    .in_flight_requests.load() == expected);
+    };
+
+    // ========================================================
+    // TEST 12
+    // In-flight count is acquired during a backend request and
+    // released once the response completes.
+    // ========================================================
+
+    {
+        set_backend_healthy(0, true);
+        set_backend_healthy(1, false);
+
+        backend_a.set_failing(false);
+        backend_b.set_failing(false);
+
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(70));
+
+        backend_b.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        HttpTestResponse response;
+
+        std::thread request_thread(
+            [&]()
+            {
+                response = send_request(gateway_port);
+            });
+
+        // Backend A is the only eligible backend, so the request must
+        // be counted against A while its delayed response is pending.
+        wait_for_backend_in_flight(0, 1);
+
+        assert(
+            load_balancer->backends()[1]
+                    .in_flight_requests.load() == 0);
+
+        request_thread.join();
+
+        assert(response.status == 200);
+        assert(response.body == "backend A");
+
+        wait_for_in_flight(*load_balancer, 0);
+
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        set_backend_healthy(1, true);
+
+        std::cout
+            << "[PASS] in-flight request acquired and released\n";
+    }
+
+    // ========================================================
+    // TEST 13
+    // Timeout + retry releases the failed attempt and counts the
+    // retry attempt correctly.
+    // ========================================================
+
+    {
+        set_backend_healthy(0, true);
+        set_backend_healthy(1, false);
+
+        backend_a.set_failing(false);
+        backend_b.set_failing(false);
+
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(500));
+
+        backend_b.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        const auto failures_before =
+            metrics->backend_failures_total();
+
+        const auto successes_before =
+            metrics->backend_successes_total();
+
+        const auto failovers_before =
+            metrics->failovers_total();
+
+        HttpTestResponse response;
+
+        std::thread request_thread(
+            [&]()
+            {
+                response = send_request(gateway_port);
+            });
+
+        wait_for_backend_in_flight(0, 1);
+
+        // Make the alternative backend eligible so the timed-out
+        // attempt can retry onto it.
+        set_backend_healthy(1, true);
+
+        request_thread.join();
+
+        assert(response.status == 200);
+        assert(response.body == "backend B");
+
+        wait_for_in_flight(*load_balancer, 0);
+
+        assert(
+            metrics->backend_failures_total() ==
+            failures_before + 1);
+
+        assert(
+            metrics->backend_successes_total() ==
+            successes_before + 1);
+
+        assert(
+            metrics->failovers_total() ==
+            failovers_before + 1);
+
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        std::cout
+            << "[PASS] timeout + retry releases failed attempt\n";
+    }
+
+    // ========================================================
+    // TEST 14
+    // Retry exhaustion releases the slot (no leak).
+    // ========================================================
+
+    {
+        set_backend_healthy(0, true);
+        set_backend_healthy(1, false);
+
+        backend_a.set_failing(true);
+        backend_b.set_failing(false);
+
+        auto response =
+            send_request(gateway_port, "", 503);
+
+        assert(response.status == 503);
+        assert(response.body == "Service Unavailable");
+
+        wait_for_in_flight(*load_balancer, 0);
+
+        backend_a.set_failing(false);
+        set_backend_healthy(1, true);
+
+        std::cout
+            << "[PASS] no in-flight leak after retry exhaustion\n";
+    }
+
+    // ========================================================
+    // TEST 15
+    // No leak or underflow across many sequential requests.
+    // ========================================================
+
+    {
+        set_backend_healthy(0, true);
+        set_backend_healthy(1, true);
+
+        backend_a.set_failing(false);
+        backend_b.set_failing(false);
+
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        backend_b.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        for (int i = 0; i < 20; ++i)
+        {
+            auto response = send_request(gateway_port);
+            assert(response.status == 200);
+        }
+
+        wait_for_in_flight(*load_balancer, 0);
+
+        // An underflow would wrap std::size_t to a huge value and
+        // fail this assertion.
+        for (const auto &backend : load_balancer->backends())
+        {
+            assert(backend.in_flight_requests.load() == 0);
+        }
+
+        std::cout
+            << "[PASS] no in-flight leak or underflow over 20 requests\n";
+    }
+
+    // ========================================================
+    // TEST 16
+    // Concurrent least-connections: while one backend is busy the
+    // second request is routed to the idle backend; both counts are
+    // tracked independently.
+    // ========================================================
+
+    {
+        set_strategy(LoadBalancingStrategy::LEAST_CONNECTIONS);
+
+        set_backend_healthy(0, true);
+        set_backend_healthy(1, false);
+
+        backend_a.set_failing(false);
+        backend_b.set_failing(false);
+
+        // Both responses stay comfortably below the 100 ms response
+        // timeout while leaving a window to observe backend A busy.
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(60));
+
+        backend_b.set_response_delay(
+            std::chrono::milliseconds(30));
+
+        HttpTestResponse first_response;
+
+        std::thread first_thread(
+            [&]()
+            {
+                first_response = send_request(gateway_port);
+            });
+
+        // Wait until the first request owns backend A.
+        wait_for_backend_in_flight(0, 1);
+
+        // Backend A is still busy when the second request is
+        // dispatched.
+        assert(
+            load_balancer->backends()[0]
+                    .in_flight_requests.load() == 1);
+
+        // Make backend B eligible; the second request must prefer the
+        // idle backend B over the busy backend A.
+        set_backend_healthy(1, true);
+
+        auto second_response = send_request(gateway_port);
+
+        first_thread.join();
+
+        assert(first_response.status == 200);
+        assert(second_response.status == 200);
+        assert(first_response.body == "backend A");
+        assert(second_response.body == "backend B");
+
+        wait_for_in_flight(*load_balancer, 0);
+
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        backend_b.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        set_strategy(LoadBalancingStrategy::ROUND_ROBIN);
+
+        std::cout
+            << "[PASS] concurrent least-connections picks idle backend\n";
     }
 
     // ========================================================
