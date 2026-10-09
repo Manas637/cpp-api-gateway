@@ -1342,6 +1342,108 @@ int main()
     }
 
     // ========================================================
+    // TEST 17
+    // Connect timeout: the configurable backend connect timeout bounds
+    // a pending connection attempt. The test server holds the first
+    // connect in a pending state (no DNS/TCP work), so the connect
+    // timer is the only way the attempt can resolve. The attempt must
+    // fail over to the other backend with exactly one recorded
+    // failure, one failover, and zero in-flight requests afterwards.
+    // ========================================================
+
+    {
+        // A second server on a port dedicated to this test so the
+        // shared main server (and its io_context) is left untouched.
+        constexpr unsigned short connect_gateway_port = 18083;
+
+        set_backend_healthy(0, true);
+        set_backend_healthy(1, true);
+
+        backend_a.set_failing(false);
+        backend_b.set_failing(false);
+
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        backend_b.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        const auto failures_before =
+            metrics->backend_failures_total();
+
+        const auto failovers_before =
+            metrics->failovers_total();
+
+        const auto successes_before =
+            metrics->backend_successes_total();
+
+        GatewayConfig connect_config;
+
+        connect_config.port = connect_gateway_port;
+
+        connect_config.backends = {
+            Backend(
+                "127.0.0.1",
+                backend_a_port),
+
+            Backend(
+                "127.0.0.1",
+                backend_b_port)};
+
+        connect_config.rate_limit_capacity = 1000.0;
+
+        connect_config.rate_limit_refill_rate = 1000.0;
+
+        connect_config.backend_response_timeout =
+            std::chrono::milliseconds(100);
+
+        connect_config.backend_connect_timeout =
+            std::chrono::milliseconds(100);
+
+        // The first Session of this server holds its connect attempt
+        // pending so the connect timer fires deterministically.
+        Server connect_server(
+            io_context,
+            connect_config,
+            load_balancer,
+            rate_limiter,
+            metrics,
+            false,
+            true);
+
+        auto response =
+            send_request(connect_gateway_port);
+
+        assert(response.status == 200);
+
+        // The held attempt fails over to the other healthy backend.
+        // Which backend that is depends on the shared rotation state,
+        // so either response body is valid.
+        assert(
+            response.body == "backend A" ||
+            response.body == "backend B");
+
+        wait_for_in_flight(*load_balancer, 0);
+
+        // Exactly one connect attempt failed and exactly one failover
+        // occurred; the retried attempt succeeded.
+        assert(
+            metrics->backend_failures_total() ==
+            failures_before + 1);
+
+        assert(
+            metrics->failovers_total() ==
+            failovers_before + 1);
+
+        assert(
+            metrics->backend_successes_total() ==
+            successes_before + 1);
+
+        std::cout
+            << "[PASS] connect timeout fails over once with clean accounting\n";
+    }
+
+    // ========================================================
     // Cleanup
     // ========================================================
 

@@ -54,6 +54,16 @@ private:
     asio::steady_timer backend_response_timer_;
     std::chrono::milliseconds backend_response_timeout_;
     bool backend_response_timeout_triggered_ = false;
+
+    asio::steady_timer backend_connect_timer_;
+    std::chrono::milliseconds backend_connect_timeout_;
+
+    // Test-only seam: when true, the first backend connect attempt is
+    // left pending (DNS resolution is never started) so the connect
+    // timeout can be exercised deterministically without a network
+    // dependency. Consumed exactly once; always false in production.
+    bool hold_first_connect_ = false;
+
     bool backend_attempt_active_ = false;
     std::uint64_t backend_attempt_id_ = 0;
 
@@ -98,16 +108,21 @@ public:
         std::shared_ptr<RateLimiter> rate_limiter,
         std::shared_ptr<Metrics> metrics,
         bool rate_limiting_enabled,
-        std::chrono::milliseconds backend_response_timeout)
+        std::chrono::milliseconds backend_response_timeout,
+        std::chrono::milliseconds backend_connect_timeout,
+        bool test_hold_first_connect = false)
         : socket_(std::move(socket)),
           resolver_(socket_.get_executor()),
           backend_socket_(socket_.get_executor()),
           backend_response_timer_(socket_.get_executor()),
+          backend_connect_timer_(socket_.get_executor()),
           load_balancer_(std::move(load_balancer)),
           rate_limiter_(std::move(rate_limiter)),
           metrics_(std::move(metrics)),
           rate_limiting_enabled_(rate_limiting_enabled),
-          backend_response_timeout_(backend_response_timeout)
+          backend_response_timeout_(backend_response_timeout),
+          backend_connect_timeout_(backend_connect_timeout),
+          hold_first_connect_(test_hold_first_connect)
     {
     }
 
@@ -128,6 +143,99 @@ public:
     }
 
 private:
+    std::uint64_t start_backend_connect_timer()
+    {
+        auto self = shared_from_this();
+
+        const std::uint64_t attempt_id = ++backend_attempt_id_;
+
+        backend_attempt_active_ = true;
+
+        backend_connect_timer_.expires_after(
+            backend_connect_timeout_);
+
+        backend_connect_timer_.async_wait(
+            [self, attempt_id](beast::error_code ec)
+            {
+                // Ignore cancelled timers and callbacks from older
+                // attempts.
+                if (ec == asio::error::operation_aborted)
+                {
+                    return;
+                }
+
+                if (ec)
+                {
+                    Logger::log(
+                        LogLevel::ERR,
+                        "backend_connect_timer_failed",
+                        ec.message(),
+                        self->request_id_,
+                        self->selected_backend_name());
+
+                    return;
+                }
+
+                // The connect phase may already have completed.
+                if (!self->backend_attempt_active_ ||
+                    self->backend_attempt_id_ != attempt_id)
+                {
+                    return;
+                }
+
+                self->handle_backend_connect_timeout();
+            });
+
+        return attempt_id;
+    }
+
+    void handle_backend_connect_timeout()
+    {
+        // Invalidate the attempt before doing anything else so a
+        // pending resolve/connect callback returning later is inert and
+        // cannot mutate state, record metrics, or retry a second time.
+        backend_attempt_active_ = false;
+        ++backend_attempt_id_;
+
+        backend_connect_timer_.cancel();
+
+        // Abort any pending DNS resolution and TCP connection
+        // establishment. Both callbacks will complete with
+        // operation_aborted and return early via the attempt guard.
+        resolver_.cancel();
+
+        beast::error_code close_ec;
+        backend_socket_.close(close_ec);
+
+        Logger::log(
+            LogLevel::WARN,
+            "backend_connect_timeout",
+            "backend connect timed out",
+            request_id_,
+            selected_backend_name());
+
+        release_backend_slot();
+
+        metrics_->record_backend_failure();
+
+        auto transition =
+            selected_backend_->circuit_breaker.record_failure();
+
+        if (transition == CircuitBreaker::Transition::OPENED)
+        {
+            metrics_->record_circuit_open();
+        }
+
+        backend_connected_ = false;
+
+        if (retry_backend())
+        {
+            return;
+        }
+
+        send_service_unavailable();
+    }
+
     std::uint64_t start_backend_response_timer()
     {
         auto self = shared_from_this();
@@ -573,6 +681,7 @@ private:
 
         // Clear state belonging to the failed backend attempt.
         backend_response_timer_.cancel();
+        backend_connect_timer_.cancel();
 
         // Invalidate callbacks associated with the previous attempt.
         backend_attempt_active_ = false;
@@ -664,16 +773,41 @@ private:
 
         auto self = shared_from_this();
 
+        // Bound DNS resolution and TCP connection establishment with
+        // the connect timeout. Arm it before async_resolve so the whole
+        // connect phase is covered, and capture the attempt id so
+        // callbacks that complete after a timeout are ignored.
+        const std::uint64_t attempt_id =
+            start_backend_connect_timer();
+
+        // Test-only seam: consume the hold and leave the attempt
+        // pending with only the connect timer armed, so tests can
+        // deterministically exercise the timeout without a network.
+        if (hold_first_connect_)
+        {
+            hold_first_connect_ = false;
+            return;
+        }
+
         resolver_.async_resolve(
             selected_backend_->host,
             std::to_string(selected_backend_->port),
 
-            [self](
+            [self, attempt_id](
                 beast::error_code ec,
                 tcp::resolver::results_type results)
             {
+                // Ignore a callback whose attempt is no longer current.
+                if (attempt_id != self->backend_attempt_id_ ||
+                    !self->backend_attempt_active_)
+                {
+                    return;
+                }
+
                 if (ec)
                 {
+                    self->backend_connect_timer_.cancel();
+
                     self->release_backend_slot();
 
                     Logger::log(
@@ -711,12 +845,22 @@ private:
                     self->backend_socket_,
                     results,
 
-                    [self](
+                    [self, attempt_id](
                         beast::error_code ec,
                         const tcp::endpoint &)
                     {
+                        // Ignore a callback whose attempt is no longer
+                        // current.
+                        if (attempt_id != self->backend_attempt_id_ ||
+                            !self->backend_attempt_active_)
+                        {
+                            return;
+                        }
+
                         if (ec)
                         {
+                            self->backend_connect_timer_.cancel();
+
                             self->release_backend_slot();
 
                             Logger::log(
@@ -754,6 +898,8 @@ private:
                             self->send_service_unavailable();
                             return;
                         }
+
+                        self->backend_connect_timer_.cancel();
 
                         self->backend_connected_ = true;
 
@@ -1134,6 +1280,11 @@ private:
     std::shared_ptr<Metrics> metrics_;
 
     std::chrono::milliseconds backend_response_timeout_;
+    std::chrono::milliseconds backend_connect_timeout_;
+
+    // Test-only seam: exercised only when true is passed to the
+    // constructor (always false in production via main.cpp).
+    bool test_hold_first_connect_ = false;
 
 public:
     Server(
@@ -1142,7 +1293,8 @@ public:
         std::shared_ptr<LoadBalancer> load_balancer,
         std::shared_ptr<RateLimiter> rate_limiter,
         std::shared_ptr<Metrics> metrics,
-        bool rate_limiting_enabled)
+        bool rate_limiting_enabled,
+        bool test_hold_first_connect = false)
         : io_context_(io_context),
           acceptor_(
               io_context,
@@ -1151,7 +1303,9 @@ public:
           rate_limiter_(std::move(rate_limiter)),
           metrics_(std::move(metrics)),
           rate_limiting_enabled_(rate_limiting_enabled),
-          backend_response_timeout_(config.backend_response_timeout)
+          backend_response_timeout_(config.backend_response_timeout),
+          backend_connect_timeout_(config.backend_connect_timeout),
+          test_hold_first_connect_(test_hold_first_connect)
     {
         accept();
     }
@@ -1172,7 +1326,9 @@ private:
                         rate_limiter_,
                         metrics_,
                         rate_limiting_enabled_,
-                        backend_response_timeout_)
+                        backend_response_timeout_,
+                        backend_connect_timeout_,
+                        test_hold_first_connect_)
                         ->start();
 
                     accept();
