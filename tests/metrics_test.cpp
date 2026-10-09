@@ -25,6 +25,8 @@ int main()
     assert(metrics.backend_failures_total() == 0);
     assert(metrics.failovers_total() == 0);
 
+    assert(metrics.request_timeouts_total() == 0);
+
     assert(metrics.rate_limit_allowed_total() == 0);
     assert(metrics.rate_limit_rejected_total() == 0);
 
@@ -275,6 +277,24 @@ int main()
 
     std::cout
         << "[PASS] concurrent backend updates\n";
+
+    // ============================================================
+    // TEST 10: Request timeout counter
+    // ============================================================
+
+    const auto timeouts_before =
+        metrics.request_timeouts_total();
+
+    metrics.record_request_timeout();
+    metrics.record_request_timeout();
+    metrics.record_request_timeout();
+
+    assert(
+        metrics.request_timeouts_total() ==
+        timeouts_before + 3);
+
+    std::cout
+        << "[PASS] request timeout counter\n";
 
     // ============================================================
     // Final

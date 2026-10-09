@@ -64,6 +64,25 @@ private:
     // dependency. Consumed exactly once; always false in production.
     bool hold_first_connect_ = false;
 
+    // Test-only seam: when true, the first backend connect attempt is
+    // failed locally as if its connect timer had expired, determinis-
+    // tically forcing a retry without depending on a timer tick or a
+    // network dependency. Consumed exactly once; always false in
+    // production.
+    bool immediate_first_connect_timeout_ = false;
+
+    // Overall request deadline. One absolute steady_clock deadline per
+    // request, armed after the client request is fully read and shared
+    // by every backend retry. A fresh deadline is armed for each
+    // keep-alive request. It is cancelled when any response write is
+    // initiated. It intentionally does not cover the initial request
+    // read (idle keep-alive) nor the transmission of a produced
+    // response.
+    asio::steady_timer request_timer_;
+    std::chrono::milliseconds request_timeout_;
+    std::chrono::steady_clock::time_point request_deadline_;
+    bool request_timeout_triggered_ = false;
+
     bool backend_attempt_active_ = false;
     std::uint64_t backend_attempt_id_ = 0;
 
@@ -110,19 +129,25 @@ public:
         bool rate_limiting_enabled,
         std::chrono::milliseconds backend_response_timeout,
         std::chrono::milliseconds backend_connect_timeout,
-        bool test_hold_first_connect = false)
+        std::chrono::milliseconds request_timeout,
+        bool test_hold_first_connect = false,
+        bool test_immediate_first_connect_timeout = false)
         : socket_(std::move(socket)),
           resolver_(socket_.get_executor()),
           backend_socket_(socket_.get_executor()),
           backend_response_timer_(socket_.get_executor()),
           backend_connect_timer_(socket_.get_executor()),
+          request_timer_(socket_.get_executor()),
           load_balancer_(std::move(load_balancer)),
           rate_limiter_(std::move(rate_limiter)),
           metrics_(std::move(metrics)),
           rate_limiting_enabled_(rate_limiting_enabled),
           backend_response_timeout_(backend_response_timeout),
           backend_connect_timeout_(backend_connect_timeout),
-          hold_first_connect_(test_hold_first_connect)
+          request_timeout_(request_timeout),
+          hold_first_connect_(test_hold_first_connect),
+          immediate_first_connect_timeout_(
+              test_immediate_first_connect_timeout)
     {
     }
 
@@ -143,6 +168,105 @@ public:
     }
 
 private:
+    void start_request_timer()
+    {
+        auto self = shared_from_this();
+
+        // One absolute deadline per request. The wait is never re-armed
+        // by retries, so every backend attempt shares the same budget.
+        request_deadline_ =
+            request_started_at_ +
+            request_timeout_;
+
+        request_timeout_triggered_ = false;
+
+        request_timer_.expires_at(request_deadline_);
+
+        request_timer_.async_wait(
+            [self](beast::error_code ec)
+            {
+                // Cancelled on response initiation or session teardown,
+                // and stale re-entries, are no-ops.
+                if (ec)
+                {
+                    return;
+                }
+
+                if (self->request_timeout_triggered_)
+                {
+                    return;
+                }
+
+                self->handle_request_timeout();
+            });
+    }
+
+    void handle_request_timeout()
+    {
+        // Own the failure exactly once before mutating anything.
+        if (request_timeout_triggered_)
+        {
+            return;
+        }
+
+        request_timeout_triggered_ = true;
+
+        // Invalidate the current backend attempt so a pending
+        // resolve/connect/write/read callback completing later is
+        // inert and cannot record another failure, retry, or respond.
+        backend_attempt_active_ = false;
+        ++backend_attempt_id_;
+
+        backend_connect_timer_.cancel();
+        backend_response_timer_.cancel();
+
+        // Abort outstanding backend operations. Their callbacks
+        // complete with operation_aborted and return via the attempt
+        // guard.
+        resolver_.cancel();
+
+        beast::error_code close_ec;
+        backend_socket_.close(close_ec);
+
+        // The backend socket is closed whether or not a backend attempt
+        // was in flight, so a cached keep-alive connection is never
+        // reused after this point.
+        backend_connected_ = false;
+
+        Logger::log(
+            LogLevel::WARN,
+            "request_timeout",
+            "overall request timed out",
+            request_id_);
+
+        // Only attribute a backend failure when a backend attempt is
+        // actually being abandoned. If the deadline fires while the
+        // rate limiter or client path is pending, no backend is
+        // involved and none should be penalized.
+        if (backend_in_flight_counted_ &&
+            selected_backend_ != nullptr)
+        {
+            release_backend_slot();
+
+            metrics_->record_backend_failure();
+
+            auto transition =
+                selected_backend_
+                    ->circuit_breaker
+                    .record_failure();
+
+            if (transition ==
+                CircuitBreaker::Transition::OPENED)
+            {
+                metrics_->record_circuit_open();
+            }
+        }
+
+        metrics_->record_request_timeout();
+
+        send_gateway_timeout();
+    }
+
     std::uint64_t start_backend_connect_timer()
     {
         auto self = shared_from_this();
@@ -176,9 +300,12 @@ private:
                     return;
                 }
 
-                // The connect phase may already have completed.
+                // The connect phase may already have completed, or the
+                // request may already have exceeded its overall
+                // deadline (handled separately).
                 if (!self->backend_attempt_active_ ||
-                    self->backend_attempt_id_ != attempt_id)
+                    self->backend_attempt_id_ != attempt_id ||
+                    self->request_timeout_triggered_)
                 {
                     return;
                 }
@@ -269,9 +396,12 @@ private:
                     return;
                 }
 
-                // The response may already have completed.
+                // The response may already have completed, or the
+                // request may already have exceeded its overall
+                // deadline (handled separately).
                 if (!self->backend_attempt_active_ ||
-                    self->backend_attempt_id_ != attempt_id)
+                    self->backend_attempt_id_ != attempt_id ||
+                    self->request_timeout_triggered_)
                 {
                     return;
                 }
@@ -380,6 +510,9 @@ private:
 
     void close_client_connection()
     {
+        // No pending request deadline may outlive the connection.
+        request_timer_.cancel();
+
         mark_connection_closed();
 
         beast::error_code ec;
@@ -398,6 +531,10 @@ private:
     void send_service_unavailable()
     {
         auto self = shared_from_this();
+
+        // A response is about to be initiated; the request deadline no
+        // longer applies.
+        request_timer_.cancel();
 
         error_response_ =
             http::response<http::string_body>(
@@ -439,6 +576,62 @@ private:
 
                 // The response was successfully written to the client,
                 // so the request has completed.
+                self->record_request_duration();
+
+                self->request_ = {};
+                self->read_request();
+            });
+    }
+
+    void send_gateway_timeout()
+    {
+        auto self = shared_from_this();
+
+        // A response is about to be initiated; the request deadline no
+        // longer applies. (The handler normally runs from the expired
+        // request timer, so this is defensive.)
+        request_timer_.cancel();
+
+        error_response_ =
+            http::response<http::string_body>(
+                http::status::gateway_timeout,
+                request_.version());
+
+        error_response_.set(
+            http::field::content_type,
+            "text/plain");
+
+        error_response_.set(
+            "X-Request-ID",
+            request_id_);
+
+        error_response_.body() =
+            "Gateway Timeout";
+
+        error_response_.prepare_payload();
+
+        // Record the HTTP response before starting the asynchronous write.
+        self->metrics_->record_response(504);
+
+        http::async_write(
+            socket_,
+            error_response_,
+            [self](beast::error_code ec, std::size_t)
+            {
+                if (ec)
+                {
+                    Logger::log(
+                        LogLevel::ERR,
+                        "gateway_timeout_response_failed",
+                        ec.message(),
+                        self->request_id_);
+
+                    self->close_client_connection();
+                    return;
+                }
+
+                // The timeout response was successfully written to the
+                // client, so the request has completed.
                 self->record_request_duration();
 
                 self->request_ = {};
@@ -523,6 +716,11 @@ private:
 
                 self->retry_count_ = 0;
 
+                // Arm the overall request deadline. It covers rate
+                // limiting, DNS resolution, backend connect/write/read,
+                // and any retries, but not the initial request read.
+                self->start_request_timer();
+
                 Logger::log(
                     LogLevel::INFO,
                     "request_started",
@@ -572,6 +770,14 @@ private:
             client_id_,
             [self](bool allowed)
             {
+                // The overall deadline may have expired while the rate
+                // limiter callback was pending. It must not start
+                // backend work or send a second response.
+                if (self->request_timeout_triggered_)
+                {
+                    return;
+                }
+
                 if (!allowed)
                 {
                     self->metrics_->record_rate_limit_rejected();
@@ -595,6 +801,10 @@ private:
     void send_rate_limit_response()
     {
         auto self = shared_from_this();
+
+        // A response is about to be initiated; the request deadline no
+        // longer applies.
+        request_timer_.cancel();
 
         rate_limit_response_ =
             http::response<http::string_body>(
@@ -712,6 +922,13 @@ private:
 
     void connect_to_backend(const Backend *excluded_backend = nullptr)
     {
+        // Never start backend work for a request whose overall deadline
+        // has already expired.
+        if (request_timeout_triggered_)
+        {
+            return;
+        }
+
         if (backend_connected_)
         {
             send_to_backend();
@@ -780,6 +997,17 @@ private:
         const std::uint64_t attempt_id =
             start_backend_connect_timer();
 
+        // Test-only seam: fail the first attempt locally and
+        // deterministically force a retry, without depending on a timer
+        // tick or a network dependency.
+        if (immediate_first_connect_timeout_)
+        {
+            immediate_first_connect_timeout_ = false;
+
+            handle_backend_connect_timeout();
+            return;
+        }
+
         // Test-only seam: consume the hold and leave the attempt
         // pending with only the connect timer armed, so tests can
         // deterministically exercise the timeout without a network.
@@ -797,9 +1025,11 @@ private:
                 beast::error_code ec,
                 tcp::resolver::results_type results)
             {
-                // Ignore a callback whose attempt is no longer current.
+                // Ignore a callback whose attempt is no longer current or whose
+                // request already exceeded its overall deadline.
                 if (attempt_id != self->backend_attempt_id_ ||
-                    !self->backend_attempt_active_)
+                    !self->backend_attempt_active_ ||
+                    self->request_timeout_triggered_)
                 {
                     return;
                 }
@@ -850,9 +1080,11 @@ private:
                         const tcp::endpoint &)
                     {
                         // Ignore a callback whose attempt is no longer
-                        // current.
+                        // current or whose request already exceeded
+                        // its overall deadline.
                         if (attempt_id != self->backend_attempt_id_ ||
-                            !self->backend_attempt_active_)
+                            !self->backend_attempt_active_ ||
+                            self->request_timeout_triggered_)
                         {
                             return;
                         }
@@ -932,6 +1164,14 @@ private:
                 beast::error_code ec,
                 std::size_t)
             {
+                // The overall deadline may have expired while the write
+                // was pending; the request-timeout path already owns
+                // failure accounting and the response.
+                if (self->request_timeout_triggered_)
+                {
+                    return;
+                }
+
                 if (ec)
                 {
                     self->release_backend_slot();
@@ -978,6 +1218,14 @@ private:
 
     void handle_backend_response_timeout()
     {
+        // The overall deadline may have expired first; the request
+        // timeout path already owns failure accounting and the
+        // response.
+        if (request_timeout_triggered_)
+        {
+            return;
+        }
+
         release_backend_slot();
 
         metrics_->record_backend_failure();
@@ -1019,9 +1267,11 @@ private:
                 beast::error_code ec,
                 std::size_t)
             {
-                // Ignore a callback if its attempt is no longer current.
+                // Ignore a callback if its attempt is no longer current
+                // or the request already exceeded its overall deadline.
                 if (attempt_id != self->backend_attempt_id_ ||
-                    !self->backend_attempt_active_)
+                    !self->backend_attempt_active_ ||
+                    self->request_timeout_triggered_)
                 {
                     return;
                 }
@@ -1102,6 +1352,11 @@ private:
     void send_to_client()
     {
         auto self = shared_from_this();
+
+        // The response is about to be initiated; the request deadline
+        // no longer applies. Transmission of a produced response is not
+        // aborted mid-write.
+        request_timer_.cancel();
 
         backend_response_.version(
             request_.version());
@@ -1281,10 +1536,12 @@ private:
 
     std::chrono::milliseconds backend_response_timeout_;
     std::chrono::milliseconds backend_connect_timeout_;
+    std::chrono::milliseconds request_timeout_;
 
-    // Test-only seam: exercised only when true is passed to the
+    // Test-only seams: exercised only when true is passed to the
     // constructor (always false in production via main.cpp).
     bool test_hold_first_connect_ = false;
+    bool test_immediate_first_connect_timeout_ = false;
 
 public:
     Server(
@@ -1294,7 +1551,8 @@ public:
         std::shared_ptr<RateLimiter> rate_limiter,
         std::shared_ptr<Metrics> metrics,
         bool rate_limiting_enabled,
-        bool test_hold_first_connect = false)
+        bool test_hold_first_connect = false,
+        bool test_immediate_first_connect_timeout = false)
         : io_context_(io_context),
           acceptor_(
               io_context,
@@ -1305,7 +1563,10 @@ public:
           rate_limiting_enabled_(rate_limiting_enabled),
           backend_response_timeout_(config.backend_response_timeout),
           backend_connect_timeout_(config.backend_connect_timeout),
-          test_hold_first_connect_(test_hold_first_connect)
+          request_timeout_(config.request_timeout),
+          test_hold_first_connect_(test_hold_first_connect),
+          test_immediate_first_connect_timeout_(
+              test_immediate_first_connect_timeout)
     {
         accept();
     }
@@ -1328,7 +1589,9 @@ private:
                         rate_limiting_enabled_,
                         backend_response_timeout_,
                         backend_connect_timeout_,
-                        test_hold_first_connect_)
+                        request_timeout_,
+                        test_hold_first_connect_,
+                        test_immediate_first_connect_timeout_)
                         ->start();
 
                     accept();

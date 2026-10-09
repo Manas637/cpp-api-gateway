@@ -64,6 +64,13 @@ void Metrics::record_failover()
         std::memory_order_relaxed);
 }
 
+void Metrics::record_request_timeout()
+{
+    request_timeouts_total_.fetch_add(
+        1,
+        std::memory_order_relaxed);
+}
+
 // ============================================================
 // Rate limiter metrics
 // ============================================================
@@ -177,6 +184,12 @@ std::uint64_t Metrics::failovers_total() const
         std::memory_order_relaxed);
 }
 
+std::uint64_t Metrics::request_timeouts_total() const
+{
+    return request_timeouts_total_.load(
+        std::memory_order_relaxed);
+}
+
 std::uint64_t Metrics::rate_limit_allowed_total() const
 {
     return rate_limit_allowed_total_.load(
@@ -271,6 +284,13 @@ std::string Metrics::to_prometheus() const
         << "# TYPE gateway_failovers_total counter\n"
         << "gateway_failovers_total "
         << failovers_total()
+        << '\n';
+
+    output
+        << "# HELP gateway_request_timeouts_total Total requests that exceeded the overall request timeout\n"
+        << "# TYPE gateway_request_timeouts_total counter\n"
+        << "gateway_request_timeouts_total "
+        << request_timeouts_total()
         << '\n';
 
     output

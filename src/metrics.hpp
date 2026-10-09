@@ -22,6 +22,9 @@ public:
 
     void record_failover();
 
+    // Request-level timeout metric
+    void record_request_timeout();
+
     // Rate limiter metrics
     void record_rate_limit_allowed();
 
@@ -58,6 +61,8 @@ public:
 
     std::uint64_t failovers_total() const;
 
+    std::uint64_t request_timeouts_total() const;
+
     std::uint64_t rate_limit_allowed_total() const;
 
     std::uint64_t rate_limit_rejected_total() const;
@@ -86,6 +91,8 @@ private:
     std::atomic<std::uint64_t> backend_successes_total_{0};
     std::atomic<std::uint64_t> backend_failures_total_{0};
     std::atomic<std::uint64_t> failovers_total_{0};
+
+    std::atomic<std::uint64_t> request_timeouts_total_{0};
 
     std::atomic<std::uint64_t> rate_limit_allowed_total_{0};
     std::atomic<std::uint64_t> rate_limit_rejected_total_{0};

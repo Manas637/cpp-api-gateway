@@ -17,6 +17,7 @@
 #include "gateway_config.hpp"
 #include "in_memory_rate_limit_store.hpp"
 #include "load_balancer.hpp"
+#include "rate_limit_store.hpp"
 #include "rate_limiter.hpp"
 #include "server.hpp"
 #include "metrics.hpp"
@@ -324,6 +325,119 @@ HttpTestResponse send_request(
 
     return result;
 }
+
+// ============================================================
+// Keep-Alive HTTP Client Helper
+// ============================================================
+
+// Sends sequential requests over a single persistent connection so
+// keep-alive behavior can be exercised. send_request() opens a fresh
+// connection and asks the server to close after each exchange.
+struct KeepAliveClient
+{
+    explicit KeepAliveClient(unsigned short gateway_port)
+    {
+        tcp::resolver resolver(io_context_);
+
+        auto endpoints = resolver.resolve(
+            "127.0.0.1",
+            std::to_string(gateway_port));
+
+        asio::connect(socket_, endpoints);
+    }
+
+    unsigned int exchange(unsigned int expected_status = 200)
+    {
+        http::request<http::string_body> request{
+            http::verb::get,
+            "/",
+            11};
+
+        request.set(
+            http::field::host,
+            "localhost");
+
+        http::write(
+            socket_,
+            request);
+
+        beast::flat_buffer buffer;
+
+        http::response<http::string_body> response;
+
+        http::read(
+            socket_,
+            buffer,
+            response);
+
+        assert(
+            response.result_int() ==
+            expected_status);
+
+        return response.result_int();
+    }
+
+private:
+    asio::io_context io_context_;
+    tcp::socket socket_{io_context_};
+};
+
+// ============================================================
+// Deferred Rate Limit Store
+// ============================================================
+
+// Test-only store whose next single async_consume is deferred by a
+// fixed delay instead of granting synchronously. This deterministically
+// opens the window in which the overall request deadline can expire
+// while the rate limiter callback is still pending (i.e. before any
+// backend slot has been acquired).
+class DeferredRateLimitStore : public RateLimitStore
+{
+public:
+    explicit DeferredRateLimitStore(asio::io_context &io_context)
+        : defer_timer_(io_context)
+    {
+    }
+
+    void defer_next_consume(std::chrono::milliseconds delay)
+    {
+        defer_delay_ = delay;
+
+        defer_next_.store(true);
+    }
+
+    void async_consume(
+        const std::string &,
+        double,
+        double,
+        ConsumeHandler handler) override
+    {
+        if (!defer_next_.exchange(false))
+        {
+            handler(true);
+            return;
+        }
+
+        defer_timer_.expires_after(
+            defer_delay_);
+
+        defer_timer_.async_wait(
+            [handler](beast::error_code ec)
+            {
+                if (ec)
+                {
+                    return;
+                }
+
+                handler(true);
+            });
+    }
+
+private:
+    asio::steady_timer defer_timer_;
+    std::chrono::milliseconds defer_delay_{0};
+    std::atomic_bool defer_next_{false};
+};
 
 void assert_metric(
     const Metrics &metrics,
@@ -1441,6 +1555,383 @@ int main()
 
         std::cout
             << "[PASS] connect timeout fails over once with clean accounting\n";
+    }
+
+    // ========================================================
+    // TEST 18
+    // Overall request timeout while waiting for the backend response.
+    // The connect timeout cannot abort it and the response timeout is
+    // far longer, so the overall deadline is the only timer that can
+    // resolve the request. The in-flight backend attempt is abandoned
+    // in place: no retry, no backend success, exactly one backend
+    // failure and one timeout. The client receives 504.
+    // ========================================================
+
+    {
+        constexpr unsigned short timeout_gateway_port = 18084;
+
+        set_backend_healthy(0, true);
+        set_backend_healthy(1, true);
+
+        backend_a.set_failing(false);
+        backend_b.set_failing(false);
+
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(2000));
+
+        backend_b.set_response_delay(
+            std::chrono::milliseconds(2000));
+
+        const auto timeouts_before =
+            metrics->request_timeouts_total();
+
+        const auto failures_before =
+            metrics->backend_failures_total();
+
+        const auto failovers_before =
+            metrics->failovers_total();
+
+        const auto successes_before =
+            metrics->backend_successes_total();
+
+        const auto responses_5xx_before =
+            metrics->responses_5xx_total();
+
+        GatewayConfig timeout_config;
+
+        timeout_config.port = timeout_gateway_port;
+
+        timeout_config.backends = {
+            Backend(
+                "127.0.0.1",
+                backend_a_port),
+
+            Backend(
+                "127.0.0.1",
+                backend_b_port)};
+
+        timeout_config.rate_limit_capacity = 1000.0;
+
+        timeout_config.rate_limit_refill_rate = 1000.0;
+
+        timeout_config.backend_connect_timeout =
+            std::chrono::milliseconds(100);
+
+        // Formally out of reach for this request: the overall deadline
+        // fires long before the response timer could.
+        timeout_config.backend_response_timeout =
+            std::chrono::milliseconds(5000);
+
+        timeout_config.request_timeout =
+            std::chrono::milliseconds(120);
+
+        Server timeout_server(
+            io_context,
+            timeout_config,
+            load_balancer,
+            rate_limiter,
+            metrics,
+            false);
+
+        auto response =
+            send_request(timeout_gateway_port, "", 504);
+
+        assert(response.status == 504);
+
+        assert(response.body == "Gateway Timeout");
+
+        wait_for_in_flight(*load_balancer, 0);
+
+        assert(
+            metrics->request_timeouts_total() ==
+            timeouts_before + 1);
+
+        // The abandoned backend attempt is the only failure; there is
+        // no retry.
+        assert(
+            metrics->backend_failures_total() ==
+            failures_before + 1);
+
+        assert(
+            metrics->failovers_total() ==
+            failovers_before);
+
+        assert(
+            metrics->backend_successes_total() ==
+            successes_before);
+
+        assert(
+            metrics->responses_5xx_total() ==
+            responses_5xx_before + 1);
+
+        std::cout
+            << "[PASS] overall request timeout returns 504 without retry\n";
+
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        backend_b.set_response_delay(
+            std::chrono::milliseconds(0));
+    }
+
+    // ========================================================
+    // TEST 19
+    // Overall deadline shared across backend retries.
+    //
+    // The first backend attempt is failed deterministically by a
+    // test-only seam (as if its connect timer expired), which forces a
+    // retry. The retry attempt is then held pending. Neither attempt
+    // depends on timing: the first is failed synchronously and the
+    // second can only be resolved by the absolute request deadline.
+    // Because the deadline was armed at request start and never
+    // re-armed, the retry is terminated by the original deadline even
+    // though its own connect timer would not expire for a long time.
+    // If the deadline had been reset per attempt, the held retry would
+    // still be pending and the request would not resolve; the assert on
+    // exactly one timeout, one failover, two backend failures and zero
+    // backend successes proves the shared-deadline behavior.
+    // ========================================================
+
+    {
+        constexpr unsigned short shared_deadline_port = 18085;
+
+        set_backend_healthy(0, true);
+        set_backend_healthy(1, true);
+
+        backend_a.set_failing(false);
+        backend_b.set_failing(false);
+
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        backend_b.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        const auto timeouts_before =
+            metrics->request_timeouts_total();
+
+        const auto failures_before =
+            metrics->backend_failures_total();
+
+        const auto failovers_before =
+            metrics->failovers_total();
+
+        const auto successes_before =
+            metrics->backend_successes_total();
+
+        GatewayConfig shared_config;
+
+        shared_config.port = shared_deadline_port;
+
+        shared_config.backends = {
+            Backend(
+                "127.0.0.1",
+                backend_a_port),
+
+            Backend(
+                "127.0.0.1",
+                backend_b_port)};
+
+        shared_config.rate_limit_capacity = 1000.0;
+
+        shared_config.rate_limit_refill_rate = 1000.0;
+
+        // Long enough that neither the first (seam-failed) nor the
+        // second (held) connect attempt can be resolved or cancelled by
+        // the connect timer; only the overall deadline can.
+        shared_config.backend_connect_timeout =
+            std::chrono::milliseconds(5000);
+
+        shared_config.backend_response_timeout =
+            std::chrono::milliseconds(5000);
+
+        shared_config.request_timeout =
+            std::chrono::milliseconds(120);
+
+        // test_hold_first_connect = true holds the retry pending.
+        // test_immediate_first_connect_timeout = true fails the first
+        // attempt synchronously, forcing the retry before the deadline
+        // can expire.
+        Server shared_deadline_server(
+            io_context,
+            shared_config,
+            load_balancer,
+            rate_limiter,
+            metrics,
+            false,
+            true,
+            true);
+
+        auto response =
+            send_request(shared_deadline_port, "", 504);
+
+        assert(response.status == 504);
+
+        wait_for_in_flight(*load_balancer, 0);
+
+        assert(
+            metrics->request_timeouts_total() ==
+            timeouts_before + 1);
+
+        // First attempt failed (seam); the retry attempt was abandoned
+        // by the overall deadline.
+        assert(
+            metrics->backend_failures_total() ==
+            failures_before + 2);
+
+        // The retry started before the deadline expired.
+        assert(
+            metrics->failovers_total() ==
+            failovers_before + 1);
+
+        // The retry never completed: the original absolute deadline
+        // terminated it.
+        assert(
+            metrics->backend_successes_total() ==
+            successes_before);
+
+        std::cout
+            << "[PASS] retry shares the original request deadline\n";
+    }
+
+    // ========================================================
+    // TEST 20
+    // Overall request timeout while the rate limiter callback is still
+    // pending (no backend slot acquired yet) must not leave a reusable
+    // keep-alive connection pointing at a closed backend socket. The
+    // next request on that connection must open a fresh backend
+    // connection instead of recording a spurious backend failure or
+    // failover.
+    // ========================================================
+
+    // Owned by main scope rather than the TEST 20 block so that it
+    // outlives the block-scoped RateLimiter, the test Server and any
+    // Session that references it. It is destroyed only after
+    // io_context.stop() and io_thread.join() below, at which point no
+    // handler can run and the reference can no longer be dereferenced.
+    DeferredRateLimitStore deferred_store(io_context);
+
+    {
+        constexpr unsigned short timeout_gateway_port = 18086;
+
+        set_backend_healthy(0, true);
+        set_backend_healthy(1, true);
+
+        backend_a.set_failing(false);
+        backend_b.set_failing(false);
+
+        backend_a.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        backend_b.set_response_delay(
+            std::chrono::milliseconds(0));
+
+        auto deferred_rate_limiter =
+            std::make_shared<RateLimiter>(
+                deferred_store,
+                1000.0,
+                1000.0);
+
+        GatewayConfig timeout_config;
+
+        timeout_config.port = timeout_gateway_port;
+
+        timeout_config.backends = {
+            Backend(
+                "127.0.0.1",
+                backend_a_port,
+                failure_threshold,
+                open_duration),
+
+            Backend(
+                "127.0.0.1",
+                backend_b_port,
+                failure_threshold,
+                open_duration)};
+
+        timeout_config.rate_limit_capacity = 1000.0;
+
+        timeout_config.rate_limit_refill_rate = 1000.0;
+
+        timeout_config.backend_connect_timeout =
+            std::chrono::milliseconds(5000);
+
+        timeout_config.backend_response_timeout =
+            std::chrono::milliseconds(5000);
+
+        timeout_config.request_timeout =
+            std::chrono::milliseconds(100);
+
+        // Rate limiting is enabled so the deadline can expire before a
+        // backend slot is acquired.
+        Server timeout_server(
+            io_context,
+            timeout_config,
+            load_balancer,
+            deferred_rate_limiter,
+            metrics,
+            true);
+
+        KeepAliveClient client(timeout_gateway_port);
+
+        const auto requests_before =
+            metrics->backend_requests_total();
+
+        const auto failures_before =
+            metrics->backend_failures_total();
+
+        const auto failovers_before =
+            metrics->failovers_total();
+
+        const auto timeouts_before =
+            metrics->request_timeouts_total();
+
+        // 1. A normal request establishes a reusable backend connection.
+        assert(client.exchange(200) == 200);
+
+        // 2. Defer the next rate limiter callback so the 100 ms overall
+        //    deadline wins while no backend slot has been acquired.
+        deferred_store.defer_next_consume(
+            std::chrono::milliseconds(500));
+
+        assert(client.exchange(504) == 504);
+
+        // Let the deferred rate limiter callback run and observe the
+        // already timed-out request before the next request is sent.
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(700));
+
+        // 3. The next request on the same connection must open a fresh
+        //    backend connection. Reusing the closed socket would make
+        //    this exchange both fail and retry.
+        assert(client.exchange(200) == 200);
+
+        wait_for_in_flight(*load_balancer, 0);
+
+        assert(
+            metrics->request_timeouts_total() ==
+            timeouts_before + 1);
+
+        // Exchanges 1 and 3 each issue exactly one backend request; the
+        // timed-out exchange never reaches a backend. Reusing the closed
+        // socket would record a failed write plus a retry (+3).
+        assert(
+            metrics->backend_requests_total() ==
+            requests_before + 2);
+
+        // The stale socket must never be reported as a backend failure.
+        assert(
+            metrics->backend_failures_total() ==
+            failures_before);
+
+        // A fresh connection may legitimately be routed to a different
+        // backend (one failover), but never more than that.
+        assert(
+            metrics->failovers_total() <=
+            failovers_before + 1);
+
+        std::cout
+            << "[PASS] timeout during rate limit keeps keep-alive reusable\n";
     }
 
     // ========================================================
