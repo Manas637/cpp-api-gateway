@@ -54,6 +54,8 @@ private:
     asio::steady_timer backend_response_timer_;
     std::chrono::milliseconds backend_response_timeout_;
     bool backend_response_timeout_triggered_ = false;
+    bool backend_attempt_active_ = false;
+    std::uint64_t backend_attempt_id_ = 0;
 
     beast::flat_buffer backend_buffer_;
     http::response<http::string_body> backend_response_;
@@ -68,6 +70,7 @@ private:
 
     Backend *selected_backend_ = nullptr;
     bool backend_connected_ = false;
+    std::size_t retry_count_ = 0;
 
     std::string client_id_;
     std::string request_id_;
@@ -114,18 +117,22 @@ public:
     }
 
 private:
-    void start_backend_response_timer()
+    std::uint64_t start_backend_response_timer()
     {
         auto self = shared_from_this();
 
+        const std::uint64_t attempt_id = ++backend_attempt_id_;
+
+        backend_attempt_active_ = true;
         backend_response_timeout_triggered_ = false;
 
         backend_response_timer_.expires_after(
             backend_response_timeout_);
 
         backend_response_timer_.async_wait(
-            [self](beast::error_code ec)
+            [self, attempt_id](beast::error_code ec)
             {
+                // Ignore cancelled timers and callbacks from older attempts.
                 if (ec == asio::error::operation_aborted)
                 {
                     return;
@@ -143,6 +150,13 @@ private:
                     return;
                 }
 
+                // The response may already have completed.
+                if (!self->backend_attempt_active_ ||
+                    self->backend_attempt_id_ != attempt_id)
+                {
+                    return;
+                }
+
                 self->backend_response_timeout_triggered_ = true;
 
                 Logger::log(
@@ -152,11 +166,15 @@ private:
                     self->request_id_,
                     self->selected_backend_name());
 
+                // Closing the socket completes the pending async_read.
+                // The read callback owns failure handling and retry.
                 beast::error_code close_ec;
-
                 self->backend_socket_.close(close_ec);
             });
+
+        return attempt_id;
     }
+
     // -------------------------------------------------------------------------
     // Request latency metrics
     // -------------------------------------------------------------------------
@@ -350,6 +368,8 @@ private:
                 self->request_started_at_ =
                     std::chrono::steady_clock::now();
 
+                self->retry_count_ = 0;
+
                 Logger::log(
                     LogLevel::INFO,
                     "request_started",
@@ -471,11 +491,72 @@ private:
             });
     }
 
+    bool can_retry() const
+    {
+        const auto method = request_.method();
+
+        Logger::log(
+            LogLevel::INFO,
+            "retry_check",
+            "checking retry eligibility",
+            request_id_,
+            selected_backend_name());
+
+        if (retry_count_ >= 1)
+            return false;
+
+        return method == http::verb::get ||
+               method == http::verb::head ||
+               method == http::verb::put ||
+               method == http::verb::delete_ ||
+               method == http::verb::options;
+    }
+
+    bool retry_backend()
+    {
+        if (!can_retry())
+            return false;
+
+        ++retry_count_;
+
+        Logger::log(
+            LogLevel::WARN,
+            "backend_retry",
+            "retrying request on another backend",
+            request_id_,
+            selected_backend_name());
+
+        // Clear state belonging to the failed backend attempt.
+        backend_response_timer_.cancel();
+
+        // Invalidate callbacks associated with the previous attempt.
+        backend_attempt_active_ = false;
+        ++backend_attempt_id_;
+        backend_response_timeout_triggered_ = false;
+
+        backend_buffer_.consume(backend_buffer_.size());
+        backend_response_ = {};
+
+        // Start the next backend attempt after the current async
+        // callback has completely returned.
+        // Preserve the failed backend pointer so the retry excludes it.
+        Backend *failed_backend = selected_backend_;
+
+        asio::post(
+            socket_.get_executor(),
+            [self = shared_from_this(), failed_backend]()
+            {
+                self->connect_to_backend(failed_backend);
+            });
+
+        return true;
+    }
+
     // -------------------------------------------------------------------------
     // Backend connection
     // -------------------------------------------------------------------------
 
-    void connect_to_backend()
+    void connect_to_backend(const Backend *excluded_backend = nullptr)
     {
         if (backend_connected_)
         {
@@ -491,7 +572,7 @@ private:
                 CircuitBreaker::Transition::NONE;
 
             selected_backend_ =
-                &load_balancer_->next(&transition);
+                &load_balancer_->next(&transition, excluded_backend);
 
             if (transition ==
                 CircuitBreaker::Transition::HALF_OPENED)
@@ -559,8 +640,12 @@ private:
 
                     self->backend_connected_ = false;
 
-                    self->connect_to_backend();
+                    if (self->retry_backend())
+                    {
+                        return;
+                    }
 
+                    self->send_service_unavailable();
                     return;
                 }
 
@@ -601,8 +686,12 @@ private:
 
                             self->backend_connected_ = false;
 
-                            self->connect_to_backend();
+                            if (self->retry_backend())
+                            {
+                                return;
+                            }
 
+                            self->send_service_unavailable();
                             return;
                         }
 
@@ -660,8 +749,12 @@ private:
 
                     self->backend_connected_ = false;
 
-                    self->connect_to_backend();
+                    if (self->retry_backend())
+                    {
+                        return;
+                    }
 
+                    self->send_service_unavailable();
                     return;
                 }
 
@@ -683,7 +776,12 @@ private:
 
         backend_connected_ = false;
 
-        connect_to_backend();
+        if (retry_backend())
+        {
+            return;
+        }
+
+        send_service_unavailable();
     }
 
     // -------------------------------------------------------------------------
@@ -694,30 +792,40 @@ private:
     {
         auto self = shared_from_this();
 
-        start_backend_response_timer();
+        const std::uint64_t attempt_id =
+            start_backend_response_timer();
 
         http::async_read(
             backend_socket_,
             backend_buffer_,
             backend_response_,
-
-            [self](
+            [self, attempt_id](
                 beast::error_code ec,
                 std::size_t)
             {
-                if (!ec)
+                // Ignore a callback if its attempt is no longer current.
+                if (attempt_id != self->backend_attempt_id_ ||
+                    !self->backend_attempt_active_)
                 {
-                    self->backend_response_timer_.cancel();
-                }
-                if (ec == asio::error::operation_aborted &&
-                    self->backend_response_timeout_triggered_)
-                {
-                    self->backend_response_timeout_triggered_ = false;
-
-                    self->handle_backend_response_timeout();
-
                     return;
                 }
+
+                // The timer expired and closed the backend socket.
+                // Handle this attempt's failure exactly once.
+                if (self->backend_response_timeout_triggered_)
+                {
+                    self->backend_attempt_active_ = false;
+                    self->backend_response_timeout_triggered_ = false;
+                    self->backend_response_timer_.cancel();
+
+                    self->handle_backend_response_timeout();
+                    return;
+                }
+
+                // The read completed before the timeout was processed.
+                self->backend_attempt_active_ = false;
+                self->backend_response_timer_.cancel();
+
                 if (ec)
                 {
                     Logger::log(
@@ -730,8 +838,7 @@ private:
                     self->metrics_->record_backend_failure();
 
                     auto transition =
-                        self->selected_backend_
-                            ->circuit_breaker
+                        self->selected_backend_->circuit_breaker
                             .record_failure();
 
                     if (transition ==
@@ -741,22 +848,23 @@ private:
                     }
 
                     beast::error_code close_ec;
-
-                    self->backend_socket_.close(
-                        close_ec);
+                    self->backend_socket_.close(close_ec);
 
                     self->backend_connected_ = false;
 
-                    self->connect_to_backend();
+                    if (self->retry_backend())
+                    {
+                        return;
+                    }
 
+                    self->send_service_unavailable();
                     return;
                 }
 
                 self->metrics_->record_backend_success();
 
                 auto transition =
-                    self->selected_backend_
-                        ->circuit_breaker
+                    self->selected_backend_->circuit_breaker
                         .record_success();
 
                 if (transition ==

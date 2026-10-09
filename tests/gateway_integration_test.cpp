@@ -7,6 +7,7 @@
 #include <thread>
 #include <cstdint>
 #include <mutex>
+#include <future>
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -335,6 +336,33 @@ void assert_metric(
     uint64_t circuit_half_opens,
     uint64_t circuit_recoveries)
 {
+    // The gateway runs on a dedicated io_context thread.
+    // Wait briefly for the final metric updates before checking
+    // the exact cumulative values.
+    constexpr auto timeout = std::chrono::milliseconds(500);
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + timeout;
+
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (metrics.requests_total() == requests &&
+            metrics.backend_requests_total() == backend_requests &&
+            metrics.backend_successes_total() == backend_successes &&
+            metrics.backend_failures_total() == backend_failures &&
+            metrics.failovers_total() == failovers &&
+            metrics.circuit_opens_total() == circuit_opens &&
+            metrics.circuit_half_opens_total() == circuit_half_opens &&
+            metrics.circuit_recoveries_total() == circuit_recoveries)
+        {
+            return;
+        }
+
+        std::this_thread::yield();
+    }
+
+    // If the expected values were not observed within the timeout,
+    // fail with the original exact assertions.
     assert(metrics.requests_total() == requests);
     assert(metrics.backend_requests_total() == backend_requests);
     assert(metrics.backend_successes_total() == backend_successes);
@@ -403,6 +431,8 @@ int main()
             std::move(backends));
 
     auto metrics = std::make_shared<Metrics>();
+
+    
 
     // ========================================================
     // Rate Limiter
@@ -580,6 +610,58 @@ int main()
 
     // ========================================================
     // TEST 4
+    // Maximum one retry when both backends fail
+    // ========================================================
+
+    backend_a.set_failing(true);
+    backend_b.set_failing(true);
+
+    {
+        const auto backend_requests_before =
+            metrics->backend_requests_total();
+
+        const auto backend_failures_before =
+            metrics->backend_failures_total();
+
+        const auto failovers_before =
+            metrics->failovers_total();
+
+        auto response =
+            send_request(
+                gateway_port,
+                "",
+                503);
+
+        // First backend fails, gateway retries once on
+        // the second backend, which also fails.
+        assert(response.status == 503);
+        assert(response.body == "Service Unavailable");
+
+        // Exactly two backend attempts:
+        // A + one retry on B.
+        assert(
+            metrics->backend_requests_total() ==
+            backend_requests_before + 2);
+
+        // Both backend attempts failed.
+        assert(
+            metrics->backend_failures_total() ==
+            backend_failures_before + 2);
+
+        // Exactly one failover occurred.
+        assert(
+            metrics->failovers_total() ==
+            failovers_before + 1);
+
+        std::cout
+            << "[PASS] maximum one retry when both backends fail\n";
+    }
+
+    backend_a.set_failing(false);
+    backend_b.set_failing(false);
+
+    // ========================================================
+    // TEST 5
     // Backend A failure -> failover to B
     // ========================================================
 
@@ -594,21 +676,22 @@ int main()
 
         assert_metric(
             *metrics,
-            5,
-            6,
-            5,
-            1,
-            1,
-            0,
-            0,
-            0);
+            6, // requests
+            8, // backend_requests
+            5, // backend_successes
+            3, // backend_failures
+            2, // failovers
+            0, // circuit_opens
+            0, // circuit_half_opens
+            0  // circuit_recoveries
+        );
 
         std::cout
             << "[PASS] failover after backend failure\n";
     }
 
     // ========================================================
-    // TEST 5
+    // TEST 6
     // Repeated A failures -> circuit OPEN
     // ========================================================
 
@@ -632,10 +715,10 @@ int main()
 
         assert_metric(
             *metrics,
+            11,
+            16,
             10,
-            15,
-            10,
-            5,
+            6,
             5,
             1,
             0,
@@ -646,7 +729,7 @@ int main()
     }
 
     // ========================================================
-    // TEST 6
+    // TEST 7
     // OPEN backend is skipped
     // ========================================================
 
@@ -665,10 +748,10 @@ int main()
 
         assert_metric(
             *metrics,
+            12,
+            17,
             11,
-            16,
-            11,
-            5,
+            6,
             5,
             1,
             0,
@@ -679,7 +762,7 @@ int main()
     }
 
     // ========================================================
-    // TEST 7
+    // TEST 8
     // OPEN -> HALF_OPEN -> CLOSED recovery
     // ========================================================
 
@@ -723,10 +806,10 @@ int main()
 
         assert_metric(
             *metrics,
+            13,
+            18,
             12,
-            17,
-            12,
-            5,
+            6,
             5,
             1,
             1,
@@ -737,7 +820,7 @@ int main()
     }
 
     // ========================================================
-    // TEST 8
+    // TEST 9
     // Recovered backend works normally
     // ========================================================
 
@@ -758,10 +841,10 @@ int main()
 
         assert_metric(
             *metrics,
+            14,
+            19,
             13,
-            18,
-            13,
-            5,
+            6,
             5,
             1,
             1,
@@ -772,7 +855,7 @@ int main()
     }
 
     // ============================================================
-    // TEST 9
+    // TEST 10
     // Backend response timeout -> failover
     // ============================================================
 
@@ -792,6 +875,12 @@ int main()
         const auto failovers_before =
             metrics->failovers_total();
 
+        const auto backend_requests_before =
+            metrics->backend_requests_total();
+
+        const auto backend_successes_before =
+            metrics->backend_successes_total();
+
         auto response =
             send_request(gateway_port);
 
@@ -799,6 +888,16 @@ int main()
         // response timeout, so the gateway must fail over to B.
         assert(response.status == 200);
         assert(response.body == "backend B");
+
+        // Exactly two backend attempts: A times out, then B succeeds.
+        assert(
+            metrics->backend_requests_total() ==
+            backend_requests_before + 2);
+
+        // Exactly one backend attempt succeeds.
+        assert(
+            metrics->backend_successes_total() ==
+            backend_successes_before + 1);
 
         assert(
             metrics->backend_failures_total() ==
@@ -814,6 +913,80 @@ int main()
 
     backend_a.set_response_delay(
         std::chrono::milliseconds(0));
+
+    // ============================================================
+    // TEST 11
+    // Retry must not select the failed backend again
+    // when no alternative backend is eligible.
+    // ============================================================
+
+    {
+        // Change backend health on the gateway's I/O thread
+        // to avoid racing with LoadBalancer::next().
+        auto set_backend_healthy =
+            [&](std::size_t index, bool healthy)
+        {
+            std::promise<void> updated;
+            auto done = updated.get_future();
+
+            asio::post(
+                io_context,
+                [&load_balancer, &updated, index, healthy]()
+                {
+                    load_balancer->backends()[index].healthy =
+                        healthy;
+
+                    updated.set_value();
+                });
+
+            done.wait();
+        };
+
+        // Ensure A is the only eligible backend, regardless
+        // of the current round-robin index.
+        set_backend_healthy(0, true);
+        set_backend_healthy(1, false);
+
+        backend_a.set_failing(true);
+
+        const auto backend_requests_before =
+            metrics->backend_requests_total();
+
+        const auto backend_failures_before =
+            metrics->backend_failures_total();
+
+        const auto failovers_before =
+            metrics->failovers_total();
+
+        auto response = send_request(gateway_port, "", 503);
+
+        assert(response.status == 503);
+        assert(response.body == "Service Unavailable");
+
+        // A was attempted once. The retry must exclude A,
+        // discover that B is ineligible, and return 503.
+        assert(
+            metrics->backend_requests_total() ==
+            backend_requests_before + 1);
+
+        assert(
+            metrics->backend_failures_total() ==
+            backend_failures_before + 1);
+
+        // No alternative backend was selected, so no
+        // successful backend switch was recorded.
+        assert(
+            metrics->failovers_total() ==
+            failovers_before);
+
+        // Restore shared state for clean shutdown.
+        backend_a.set_failing(false);
+        set_backend_healthy(1, true);
+
+        std::cout
+            << "[PASS] retry excludes failed backend when "
+               "no alternative is eligible\n";
+    }
 
     // ========================================================
     // Cleanup

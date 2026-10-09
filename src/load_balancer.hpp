@@ -21,17 +21,27 @@ public:
     }
 
     Backend &next(
-        CircuitBreaker::Transition *transition = nullptr)
+        CircuitBreaker::Transition *transition = nullptr,
+        const Backend *excluded_backend = nullptr)
     {
         const std::size_t count = backends_.size();
 
+        if (transition != nullptr)
+        {
+            *transition = CircuitBreaker::Transition::NONE;
+        }
+
         for (std::size_t i = 0; i < count; ++i)
         {
-            Backend &backend =
-                backends_[current_index_];
+            Backend &backend = backends_[current_index_];
 
-            current_index_ =
-                (current_index_ + 1) % count;
+            current_index_ = (current_index_ + 1) % count;
+
+            // Never select the backend that just failed during a retry.
+            if (&backend == excluded_backend)
+            {
+                continue;
+            }
 
             if (!backend.healthy)
             {
@@ -54,13 +64,7 @@ public:
             }
         }
 
-        if (transition != nullptr)
-        {
-            *transition = CircuitBreaker::Transition::NONE;
-        }
-
-        throw std::runtime_error(
-            "No healthy backend available");
+        throw std::runtime_error("No healthy backend available");
     }
 
     std::vector<Backend> &backends()
