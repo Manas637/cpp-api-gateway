@@ -59,6 +59,16 @@ def main():
     )
 
     parser.add_argument(
+        "--host",
+        type=str,
+        default="localhost",
+        help=(
+            "Interface to bind to. Defaults to localhost for local "
+            "development; containers must use 0.0.0.0."
+        )
+    )
+
+    parser.add_argument(
         "--name",
         type=str,
         default=None,
@@ -85,7 +95,7 @@ def main():
     )
 
     server = ThreadedHTTPServer(
-        ("localhost", args.port),
+        (args.host, args.port),
         Handler
     )
 

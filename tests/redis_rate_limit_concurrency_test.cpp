@@ -11,6 +11,7 @@
 
 #include "rate_limiter.hpp"
 #include "redis_rate_limit_store.hpp"
+#include "redis_test_util.hpp"
 
 void test_concurrent_requests()
 {
@@ -18,8 +19,8 @@ void test_concurrent_requests()
 
     RedisRateLimitStore store(
         io_context,
-        "127.0.0.1",
-        "6379");
+        redis_test::host(),
+        redis_test::port());
 
     RateLimiter limiter(
         store,
@@ -98,6 +99,18 @@ void test_concurrent_requests()
 
 int main()
 {
+    const std::string host = redis_test::host();
+    const std::string port = redis_test::port();
+
+    if (!redis_test::reachable(
+            host,
+            port,
+            std::chrono::milliseconds(1500)))
+    {
+        redis_test::report_unavailable(host, port);
+        return redis_test::SKIP_CODE;
+    }
+
     test_concurrent_requests();
 
     std::cout

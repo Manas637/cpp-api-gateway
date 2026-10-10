@@ -1,36 +1,149 @@
+# Full local stack: C++ API gateway, Redis, two sample backends,
+# Prometheus and Grafana.
+#
+# Start with:   docker compose up --build
+# Tear down:    docker compose down
+# Host URLs:    gateway http://localhost:8080
+#               prometheus http://localhost:9090
+#               grafana    http://localhost:3000  (default login admin/admin)
+#
+# The gateway speaks to Redis and the backends over the dedicated
+# `gateway` network using service names, never localhost. Host-side
+# ports are overridable with the *HOST_PORT variables below so they do
+# not clash with the application's own .env file.
+#
+# Backends are statically configured through BACKENDS. Add more by
+# copying a backend service and appending its address; see .env.example.
+name: cpp-api-gateway
+
 services:
   redis:
-    image: redis:latest
+    image: redis:7.4-alpine
     container_name: cpp-api-gateway-redis
+    # Rate-limit buckets are rebuildable, so Redis is deliberately
+    # ephemeral: no RDB/AOF persistence and no volume. This also avoids
+    # reloading a dump written by a different Redis image version.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      - gateway
+
+  backend-a:
+    build:
+      context: ./backend
+    image: cpp-api-gateway-backend:local
+    container_name: cpp-api-gateway-backend-a
+    command: ["--host", "0.0.0.0", "--port", "9001", "--name", "backend-a"]
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9001/health', timeout=2)\""
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      - gateway
+
+  backend-b:
+    build:
+      context: ./backend
+    image: cpp-api-gateway-backend:local
+    container_name: cpp-api-gateway-backend-b
+    command: ["--host", "0.0.0.0", "--port", "9002", "--name", "backend-b"]
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9002/health', timeout=2)\""
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      - gateway
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cpp-api-gateway:local
+    container_name: cpp-api-gateway
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend-a:
+        condition: service_healthy
+      backend-b:
+        condition: service_healthy
+    environment:
+      # Container-internal values; service names resolve on the compose
+      # network. These are deliberately not interpolated from the
+      # application's .env file, whose addresses point at the host.
+      GATEWAY_PORT: "8080"
+      BACKENDS: "backend-a:9001,backend-b:9002"
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      RATE_LIMITING_ENABLED: "true"
+      RATE_LIMIT_CAPACITY: "100000"
+      RATE_LIMIT_REFILL_RATE: "100000"
+      LOAD_BALANCING_STRATEGY: "ROUND_ROBIN"
+      BACKEND_CONNECT_TIMEOUT_MS: "2000"
+      BACKEND_RESPONSE_TIMEOUT_MS: "5000"
+      REQUEST_TIMEOUT_MS: "10000"
+      SHUTDOWN_GRACE_PERIOD_MS: "5000"
     ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
+      - "${GATEWAY_HOST_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "curl -fsS http://127.0.0.1:$${GATEWAY_PORT}/api/status || exit 1"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      - gateway
 
   prometheus:
     image: prom/prometheus:latest
     container_name: cpp-api-gateway-prometheus
-    ports:
-      - "9090:9090"
+    depends_on:
+      gateway:
+        condition: service_started
     volumes:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    ports:
+      - "${PROMETHEUS_HOST_PORT:-9090}:9090"
+    networks:
+      - gateway
 
   grafana:
     image: grafana/grafana:latest
     container_name: cpp-api-gateway-grafana
+    depends_on:
+      prometheus:
+        condition: service_started
     ports:
-      - "3000:3000"
+      - "${GRAFANA_HOST_PORT:-3000}:3000"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    depends_on:
-      - prometheus
+    networks:
+      - gateway
 
 volumes:
-  redis_data:
   prometheus_data:
   grafana_data:
+
+networks:
+  gateway:
+    driver: bridge

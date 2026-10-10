@@ -6,3 +6,7 @@ build/
 *.o
 *.obj
 .env
+
+# Generated Compose files (see scripts/generate_compose.py)
+docker-compose.generated.yml
+docker-compose.gen*.yml

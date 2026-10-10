@@ -1,0 +1,29 @@
+# Build output and local artifacts (Windows and Linux)
+build/
+**/*.exe
+**/*.dll
+**/*.o
+**/*.obj
+**/*.so
+**/*.a
+
+# Version control and editor data
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Local secrets and environment files
+.env
+*.env
+!.env.example
+
+# Node dependencies for the dashboard (not needed to build the gateway)
+dashboard/node_modules/
+dashboard/dist/
+
+# Docs and roadmap (not needed in the image)
+*.md
+
+# Local tooling leftovers
+curl.exe

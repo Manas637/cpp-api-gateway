@@ -5,5 +5,9 @@ scrape_configs:
   - job_name: "cpp-api-gateway"
     metrics_path: /metrics
     static_configs:
+      # `gateway` is the Compose service name and 8080 is its
+      # container-internal GATEWAY_PORT. To instead scrape a gateway
+      # running on the host, change this to "host.docker.internal:8080"
+      # and keep prometheus's `extra_hosts` mapping.
       - targets:
-          - "host.docker.internal:8080"
+          - "gateway:8080"

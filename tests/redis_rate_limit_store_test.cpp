@@ -9,6 +9,7 @@
 
 #include "rate_limiter.hpp"
 #include "redis_rate_limit_store.hpp"
+#include "redis_test_util.hpp"
 
 std::string unique_client_id(const std::string &name)
 {
@@ -60,8 +61,8 @@ void test_initial_burst()
 
     RedisRateLimitStore store(
         io_context,
-        "127.0.0.1",
-        "6379");
+        redis_test::host(),
+        redis_test::port());
 
     RateLimiter limiter(
         store,
@@ -103,8 +104,8 @@ void test_refill()
 
     RedisRateLimitStore store(
         io_context,
-        "127.0.0.1",
-        "6379");
+        redis_test::host(),
+        redis_test::port());
 
     RateLimiter limiter(
         store,
@@ -154,8 +155,8 @@ void test_different_clients()
 
     RedisRateLimitStore store(
         io_context,
-        "127.0.0.1",
-        "6379");
+        redis_test::host(),
+        redis_test::port());
 
     RateLimiter limiter(
         store,
@@ -190,6 +191,18 @@ void test_different_clients()
 
 int main()
 {
+    const std::string host = redis_test::host();
+    const std::string port = redis_test::port();
+
+    if (!redis_test::reachable(
+            host,
+            port,
+            std::chrono::milliseconds(1500)))
+    {
+        redis_test::report_unavailable(host, port);
+        return redis_test::SKIP_CODE;
+    }
+
     test_initial_burst();
     test_refill();
     test_different_clients();
