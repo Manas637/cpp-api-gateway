@@ -12,6 +12,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Boost REQUIRED)
 find_package(OpenSSL REQUIRED)
 
+# Winsock libraries are only required on Windows. Keeping them off the
+# link line on other platforms lets this same CMake project build inside
+# a Linux container without altering the existing Windows build.
+if(WIN32)
+    set(GATEWAY_PLATFORM_LIBS ws2_32 mswsock)
+else()
+    set(GATEWAY_PLATFORM_LIBS "")
+endif()
+
 
 # =========================
 # API Gateway
@@ -35,8 +44,7 @@ target_link_libraries(api_gateway
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 
@@ -127,8 +135,7 @@ target_link_libraries(redis_connection_test
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 add_test(
@@ -157,8 +164,7 @@ target_link_libraries(redis_rate_limit_store_test
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 add_test(
@@ -188,8 +194,7 @@ target_link_libraries(redis_rate_limit_concurrency_test
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 add_test(
@@ -211,8 +216,7 @@ target_link_libraries(redis_rate_limit_benchmark
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 add_executable(circuit_breaker_test
@@ -258,8 +262,7 @@ target_link_libraries(gateway_integration_test
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 add_test(
@@ -288,8 +291,7 @@ target_link_libraries(session_teardown_test
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 add_test(
@@ -319,8 +321,7 @@ target_link_libraries(rate_limit_metrics_integration_test
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 add_test(
@@ -379,8 +380,7 @@ target_link_libraries(metrics_endpoint_integration_test
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 add_test(
@@ -408,8 +408,7 @@ target_link_libraries(
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 add_test(
@@ -442,8 +441,7 @@ target_link_libraries(
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 add_test(
@@ -497,11 +495,36 @@ target_link_libraries(
     Boost::headers
     OpenSSL::SSL
     OpenSSL::Crypto
-    ws2_32
-    mswsock
+    ${GATEWAY_PLATFORM_LIBS}
 )
 
 add_test(
     NAME GracefulShutdownTest
     COMMAND graceful_shutdown_test
+)
+
+
+# -------------------------
+# Test timeouts
+# -------------------------
+
+# Default safeguard: an unexpected hang anywhere must not block CTest
+# forever. Generous enough for slow Windows/OneDrive builds and CI.
+get_property(GATEWAY_ALL_TESTS DIRECTORY PROPERTY TESTS)
+
+set_tests_properties(
+    ${GATEWAY_ALL_TESTS}
+    PROPERTIES
+    TIMEOUT 300
+)
+
+# Redis-dependent tests are bounded much tighter and report a clear
+# skip (exit code 77) when no Redis instance is reachable.
+set_tests_properties(
+    RedisConnectionTest
+    RedisRateLimitStoreTest
+    RedisRateLimitConcurrencyTest
+    PROPERTIES
+    TIMEOUT 30
+    SKIP_RETURN_CODE 77
 )

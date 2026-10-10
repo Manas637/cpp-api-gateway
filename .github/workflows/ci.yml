@@ -1,0 +1,58 @@
+name: CI
+
+"on":
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            libboost-dev \
+            libssl-dev \
+            curl
+        env:
+          DEBIAN_FRONTEND: noninteractive
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run CTest
+        env:
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "---Test summary (last log lines if available)---"
+          if [ -f build/Testing/Temporary/LastTest.log ]; then tail -n 40 build/Testing/Temporary/LastTest.log; fi
