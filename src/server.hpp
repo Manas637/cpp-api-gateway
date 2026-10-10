@@ -6,10 +6,12 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 #include <atomic>
 #include <chrono>
 #include <iomanip>
@@ -41,8 +43,174 @@ inline std::string generate_request_id()
     return oss.str();
 }
 
+// ============================================================
+// Graceful shutdown coordinator
+// ============================================================
+//
+// Owns the shutdown flag, the bounded grace-period timer and the
+// live-session count. It is io_context-affine: every member is
+// touched only from handlers running on the owning io_context's
+// thread, so no synchronization is required.
+//
+// Lifetime: held by Server (one strong reference) and by every live
+// Session. The grace-period handler captures shared_from_this(), so
+// the coordinator cannot be destroyed while a timer callback is
+// pending. Server detaches its force-close callback on destruction,
+// so no callback can ever invoke a destroyed Server.
+class ShutdownCoordinator
+    : public std::enable_shared_from_this<ShutdownCoordinator>
+{
+public:
+    ShutdownCoordinator(
+        asio::io_context &io_context,
+        std::chrono::milliseconds grace_period)
+        : io_context_(io_context),
+          grace_timer_(io_context),
+          grace_period_(grace_period)
+    {
+    }
+
+    bool shutting_down() const
+    {
+        return in_progress_;
+    }
+
+    // Installed by Server. Invoked only from a timer handler on the
+    // io thread, while Server is still alive.
+    void set_force_close(std::function<void()> callback)
+    {
+        force_close_ = std::move(callback);
+    }
+
+    // Clears the Server callback so a coordinator that outlives
+    // Server (because pending Session handlers still reference it)
+    // can never invoke a destroyed Server.
+    void detach()
+    {
+        force_close_ = nullptr;
+    }
+
+    void session_opened()
+    {
+        ++active_sessions_;
+    }
+
+    void session_closed()
+    {
+        if (active_sessions_ == 0)
+        {
+            return;
+        }
+
+        --active_sessions_;
+
+        if (in_progress_ && active_sessions_ == 0)
+        {
+            finish();
+        }
+    }
+
+    // Begins graceful shutdown. Idempotent: a second call is a no-op.
+    void begin()
+    {
+        if (in_progress_)
+        {
+            return;
+        }
+
+        in_progress_ = true;
+
+        if (active_sessions_ == 0)
+        {
+            finish();
+            return;
+        }
+
+        grace_timer_.expires_after(grace_period_);
+
+        auto self = shared_from_this();
+
+        grace_timer_.async_wait(
+            [self](beast::error_code ec)
+            {
+                if (ec)
+                {
+                    return;
+                }
+
+                self->on_grace_expired();
+            });
+    }
+
+    // Forces shutdown immediately, bypassing the grace period.
+    // Idempotent.
+    void force()
+    {
+        in_progress_ = true;
+
+        if (finished_)
+        {
+            return;
+        }
+
+        if (force_close_)
+        {
+            force_close_();
+        }
+
+        finish();
+    }
+
+private:
+    void on_grace_expired()
+    {
+        if (!in_progress_)
+        {
+            return;
+        }
+
+        if (force_close_)
+        {
+            force_close_();
+        }
+
+        finish();
+    }
+
+    void finish()
+    {
+        if (finished_)
+        {
+            return;
+        }
+
+        finished_ = true;
+
+        grace_timer_.cancel();
+
+        if (!io_context_.stopped())
+        {
+            io_context_.stop();
+        }
+    }
+
+    asio::io_context &io_context_;
+    asio::steady_timer grace_timer_;
+    std::chrono::milliseconds grace_period_;
+
+    std::function<void()> force_close_;
+
+    bool in_progress_ = false;
+    bool finished_ = false;
+    std::size_t active_sessions_ = 0;
+};
+
 class Session : public std::enable_shared_from_this<Session>
 {
+    // Server tracks live sessions and force-closes them once the grace
+    // period expires; force_close() remains a private detail.
+    friend class Server;
+
 private:
     tcp::socket socket_;
     beast::flat_buffer buffer_;
@@ -112,6 +280,12 @@ private:
 
     std::shared_ptr<Metrics> metrics_;
 
+    std::shared_ptr<ShutdownCoordinator> shutdown_;
+
+    // Ensures each session contributes exactly one increment and one
+    // decrement to the shutdown coordinator's live-session count.
+    bool shutdown_counted_ = false;
+
     // Ensures every accepted client connection contributes exactly
     // one increment and one decrement to active_connections.
     bool connection_tracked_ = false;
@@ -126,6 +300,7 @@ public:
         std::shared_ptr<LoadBalancer> load_balancer,
         std::shared_ptr<RateLimiter> rate_limiter,
         std::shared_ptr<Metrics> metrics,
+        std::shared_ptr<ShutdownCoordinator> shutdown,
         bool rate_limiting_enabled,
         std::chrono::milliseconds backend_response_timeout,
         std::chrono::milliseconds backend_connect_timeout,
@@ -141,6 +316,7 @@ public:
           load_balancer_(std::move(load_balancer)),
           rate_limiter_(std::move(rate_limiter)),
           metrics_(std::move(metrics)),
+          shutdown_(std::move(shutdown)),
           rate_limiting_enabled_(rate_limiting_enabled),
           backend_response_timeout_(backend_response_timeout),
           backend_connect_timeout_(backend_connect_timeout),
@@ -159,11 +335,13 @@ public:
         // leaks. This is a no-op when no slot was acquired.
         release_backend_slot();
         mark_connection_closed();
+        mark_session_closed();
     }
 
     void start()
     {
         mark_connection_opened();
+        mark_session_opened();
         read_request();
     }
 
@@ -475,6 +653,56 @@ private:
     }
 
     // -------------------------------------------------------------------------
+    // Shutdown participation
+    // -------------------------------------------------------------------------
+
+    // Idempotent. Paired with mark_session_closed(); ensures the live
+    // session count reaches zero exactly once per connection.
+    void mark_session_opened()
+    {
+        if (shutdown_counted_)
+            return;
+
+        shutdown_counted_ = true;
+
+        shutdown_->session_opened();
+    }
+
+    void mark_session_closed()
+    {
+        if (!shutdown_counted_)
+            return;
+
+        shutdown_counted_ = false;
+
+        shutdown_->session_closed();
+    }
+
+    // Forced shutdown at grace-period expiry: cancel every timer,
+    // abandon any in-flight backend attempt, release its in-flight
+    // count and drop the client connection.
+    void force_close()
+    {
+        request_timer_.cancel();
+        backend_connect_timer_.cancel();
+        backend_response_timer_.cancel();
+
+        backend_attempt_active_ = false;
+
+        beast::error_code ec;
+
+        resolver_.cancel();
+
+        backend_socket_.close(ec);
+
+        backend_connected_ = false;
+
+        release_backend_slot();
+
+        close_client_connection();
+    }
+
+    // -------------------------------------------------------------------------
     // Backend in-flight request accounting
     // -------------------------------------------------------------------------
 
@@ -514,6 +742,7 @@ private:
         request_timer_.cancel();
 
         mark_connection_closed();
+        mark_session_closed();
 
         beast::error_code ec;
 
@@ -528,7 +757,7 @@ private:
     // 503 response
     // -------------------------------------------------------------------------
 
-    void send_service_unavailable()
+    void send_service_unavailable(bool close_connection = false)
     {
         auto self = shared_from_this();
 
@@ -540,6 +769,11 @@ private:
             http::response<http::string_body>(
                 http::status::service_unavailable,
                 request_.version());
+
+        // A shutdown rejection advertises Connection: close so the
+        // client does not attempt to reuse the connection.
+        error_response_.keep_alive(
+            !(close_connection || shutdown_->shutting_down()));
 
         error_response_.set(
             http::field::content_type,
@@ -560,7 +794,7 @@ private:
         http::async_write(
             socket_,
             error_response_,
-            [self](beast::error_code ec, std::size_t)
+            [self, close_connection](beast::error_code ec, std::size_t)
             {
                 if (ec)
                 {
@@ -579,6 +813,15 @@ private:
                 self->record_request_duration();
 
                 self->request_ = {};
+
+                if (close_connection ||
+                    self->shutdown_->shutting_down())
+                {
+                    self->close_client_connection();
+                    return;
+                }
+
+                // Back to idle: keep-alive wait for the next request.
                 self->read_request();
             });
     }
@@ -608,6 +851,13 @@ private:
         error_response_.body() =
             "Gateway Timeout";
 
+        // During drain the connection is closed after this response;
+        // advertise that so the client does not attempt to reuse it.
+        if (shutdown_->shutting_down())
+        {
+            error_response_.keep_alive(false);
+        }
+
         error_response_.prepare_payload();
 
         // Record the HTTP response before starting the asynchronous write.
@@ -635,6 +885,14 @@ private:
                 self->record_request_duration();
 
                 self->request_ = {};
+
+                if (self->shutdown_->shutting_down())
+                {
+                    self->close_client_connection();
+                    return;
+                }
+
+                // Back to idle: keep-alive wait for the next request.
                 self->read_request();
             });
     }
@@ -668,6 +926,29 @@ private:
                         self->request_id_);
 
                     self->close_client_connection();
+                    return;
+                }
+
+                // While draining, refuse every new request with a clear
+                // signal (503 + Connection: close) instead of starting
+                // more work. Idle keep-alive connections stay open
+                // until they are answered this way or force-closed at
+                // the end of the grace period.
+                if (self->shutdown_->shutting_down())
+                {
+                    self->request_id_ = generate_request_id();
+
+                    self->request_.set(
+                        "X-Request-ID",
+                        self->request_id_);
+
+                    self->metrics_->record_request();
+
+                    self->request_started_at_ =
+                        std::chrono::steady_clock::now();
+
+                    self->send_service_unavailable(true);
+
                     return;
                 }
 
@@ -818,6 +1099,10 @@ private:
         rate_limit_response_.set(
             "X-Request-ID",
             request_id_);
+
+        // The connection is always closed after this response;
+        // advertise that consistently.
+        rate_limit_response_.keep_alive(false);
 
         rate_limit_response_.body() =
             "Too Many Requests";
@@ -1370,6 +1655,13 @@ private:
             "X-Request-ID",
             request_id_);
 
+        // During drain the connection is closed after this response;
+        // advertise that so the client does not attempt to reuse it.
+        if (shutdown_->shutting_down())
+        {
+            backend_response_.keep_alive(false);
+        }
+
         http::async_write(
             socket_,
             backend_response_,
@@ -1408,6 +1700,15 @@ private:
                 self->request_ = {};
                 self->backend_response_ = {};
 
+                // During drain, finish the in-flight request and close
+                // instead of starting another keep-alive request.
+                if (self->shutdown_->shutting_down())
+                {
+                    self->close_client_connection();
+                    return;
+                }
+
+                // Back to idle: keep-alive wait for the next request.
                 self->read_request();
             });
     }
@@ -1543,6 +1844,13 @@ private:
     bool test_hold_first_connect_ = false;
     bool test_immediate_first_connect_timeout_ = false;
 
+    // Graceful-shutdown state. shutdown_ is shared with every Session;
+    // sessions_ holds weak references so Server never extends a
+    // Session's lifetime.
+    std::shared_ptr<ShutdownCoordinator> shutdown_;
+    std::vector<std::weak_ptr<Session>> sessions_;
+    bool shutdown_started_ = false;
+
 public:
     Server(
         asio::io_context &io_context,
@@ -1566,12 +1874,80 @@ public:
           request_timeout_(config.request_timeout),
           test_hold_first_connect_(test_hold_first_connect),
           test_immediate_first_connect_timeout_(
-              test_immediate_first_connect_timeout)
+              test_immediate_first_connect_timeout),
+          shutdown_(
+              std::make_shared<ShutdownCoordinator>(
+                  io_context,
+                  config.shutdown_grace_period))
     {
         accept();
     }
 
+    ~Server()
+    {
+        // Cancel the accept loop and make sure no pending shutdown
+        // callback references this destroyed Server.
+        if (shutdown_)
+        {
+            shutdown_->detach();
+        }
+
+        beast::error_code ec;
+        acceptor_.close(ec);
+    }
+
+    // Begins graceful shutdown. Idempotent: safe to call repeatedly.
+    // Must run on the io_context's thread.
+    void begin_shutdown()
+    {
+        if (shutdown_started_)
+        {
+            return;
+        }
+
+        shutdown_started_ = true;
+
+        // 1. Stop accepting new connections.
+        beast::error_code ec;
+        acceptor_.close(ec);
+
+        // Install the forced-close hook and arm the grace period.
+        // In-flight requests keep running to completion; sessions idle
+        // on keep-alive stay open to be answered with a 503 if a new
+        // request arrives, and are force-closed when the grace period
+        // expires.
+        shutdown_->set_force_close(
+            [this]()
+            {
+                force_close_sessions();
+            });
+
+        shutdown_->begin();
+    }
+
+    // Forces shutdown immediately, bypassing the grace period.
+    void force_shutdown()
+    {
+        if (!shutdown_started_)
+        {
+            begin_shutdown();
+        }
+
+        shutdown_->force();
+    }
+
 private:
+    void force_close_sessions()
+    {
+        for (auto &weak : sessions_)
+        {
+            if (auto session = weak.lock())
+            {
+                session->force_close();
+            }
+        }
+    }
+
     void accept()
     {
         acceptor_.async_accept(
@@ -1581,18 +1957,39 @@ private:
             {
                 if (!ec)
                 {
-                    std::make_shared<Session>(
+                    // A connection may be accepted in the race window
+                    // just before shutdown closes the acceptor.
+                    if (shutdown_->shutting_down())
+                    {
+                        beast::error_code close_ec;
+                        socket.close(close_ec);
+                        return;
+                    }
+
+                    // Drop weak references to sessions that have ended.
+                    std::erase_if(
+                        sessions_,
+                        [](const std::weak_ptr<Session> &weak)
+                        {
+                            return weak.expired();
+                        });
+
+                    auto session = std::make_shared<Session>(
                         std::move(socket),
                         load_balancer_,
                         rate_limiter_,
                         metrics_,
+                        shutdown_,
                         rate_limiting_enabled_,
                         backend_response_timeout_,
                         backend_connect_timeout_,
                         request_timeout_,
                         test_hold_first_connect_,
-                        test_immediate_first_connect_timeout_)
-                        ->start();
+                        test_immediate_first_connect_timeout_);
+
+                    sessions_.push_back(session);
+
+                    session->start();
 
                     accept();
 

@@ -471,3 +471,37 @@ add_test(
     NAME ConfigTest
     COMMAND config_test
 )
+
+# -------------------------
+# Graceful Shutdown
+# Integration Test
+# -------------------------
+
+add_executable(
+    graceful_shutdown_test
+    tests/graceful_shutdown_test.cpp
+    src/rate_limiter.cpp
+    src/in_memory_rate_limit_store.cpp
+    src/metrics.cpp
+)
+
+target_include_directories(
+    graceful_shutdown_test
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(
+    graceful_shutdown_test
+    PRIVATE
+    Boost::headers
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ws2_32
+    mswsock
+)
+
+add_test(
+    NAME GracefulShutdownTest
+    COMMAND graceful_shutdown_test
+)

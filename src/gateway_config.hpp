@@ -26,4 +26,9 @@ struct GatewayConfig
     std::chrono::milliseconds backend_connect_timeout{2000};
     std::chrono::milliseconds backend_response_timeout{5000};
     std::chrono::milliseconds request_timeout{10000};
+
+    // Bounded grace period for graceful shutdown before remaining
+    // connections are force-closed. Overridable via
+    // SHUTDOWN_GRACE_PERIOD_MS.
+    std::chrono::milliseconds shutdown_grace_period{5000};
 };

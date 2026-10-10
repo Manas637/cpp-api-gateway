@@ -285,5 +285,10 @@ GatewayConfig load_config()
             "REQUEST_TIMEOUT_MS",
             std::chrono::milliseconds(10000));
 
+    config.shutdown_grace_period =
+        get_duration_ms(
+            "SHUTDOWN_GRACE_PERIOD_MS",
+            std::chrono::milliseconds(5000));
+
     return config;
 }

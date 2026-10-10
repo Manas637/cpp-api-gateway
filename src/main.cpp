@@ -1,3 +1,5 @@
+#include <csignal>
+#include <functional>
 #include <iostream>
 #include <memory>
 
@@ -68,7 +70,52 @@ int main()
             << (config.rate_limiting_enabled ? "enabled" : "disabled")
             << '\n';
 
+        asio::signal_set signals(io_context, SIGINT, SIGTERM);
+
+        bool shutdown_requested = false;
+
+        std::function<void(boost::system::error_code, int)> on_signal;
+
+        on_signal = [&](boost::system::error_code ec, int)
+        {
+            if (ec)
+            {
+                return;
+            }
+
+            if (!shutdown_requested)
+            {
+                shutdown_requested = true;
+
+                std::cout
+                    << "\nShutdown signal received; draining connections "
+                    << "(grace period "
+                    << config.shutdown_grace_period.count()
+                    << " ms)...\n";
+
+                health_checker->stop();
+
+                server.begin_shutdown();
+            }
+            else
+            {
+                std::cout
+                    << "Second shutdown signal received; forcing "
+                    << "immediate shutdown.\n";
+
+                server.force_shutdown();
+            }
+
+            signals.async_wait(on_signal);
+        };
+
+        signals.async_wait(on_signal);
+
         io_context.run();
+
+        // The io_context has stopped (drained or forced); tear down
+        // the Redis connection now that no request is in flight.
+        rate_limit_store->shutdown();
     }
     catch (const std::exception &e)
     {

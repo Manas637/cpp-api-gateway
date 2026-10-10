@@ -47,6 +47,7 @@ namespace
         unset_env("BACKEND_CONNECT_TIMEOUT_MS");
         unset_env("BACKEND_RESPONSE_TIMEOUT_MS");
         unset_env("REQUEST_TIMEOUT_MS");
+        unset_env("SHUTDOWN_GRACE_PERIOD_MS");
     }
 
     void expect(bool condition, const std::string &message)
@@ -106,6 +107,11 @@ int main()
 
             expect(config.redis_port == "6379",
                    "Default Redis port is incorrect");
+
+            expect(
+                config.shutdown_grace_period ==
+                    std::chrono::milliseconds(5000),
+                "Default shutdown grace period is incorrect");
 
             expect(
                 config.backend_connect_timeout ==
@@ -317,6 +323,7 @@ int main()
             set_env("BACKEND_CONNECT_TIMEOUT_MS", "1500");
             set_env("BACKEND_RESPONSE_TIMEOUT_MS", "7500");
             set_env("REQUEST_TIMEOUT_MS", "12000");
+            set_env("SHUTDOWN_GRACE_PERIOD_MS", "2000");
 
             GatewayConfig config = load_config();
 
@@ -334,6 +341,11 @@ int main()
                 config.request_timeout ==
                     std::chrono::milliseconds(12000),
                 "Custom request timeout is incorrect");
+
+            expect(
+                config.shutdown_grace_period ==
+                    std::chrono::milliseconds(2000),
+                "Custom shutdown grace period is incorrect");
 
             clear_config_environment();
         }
