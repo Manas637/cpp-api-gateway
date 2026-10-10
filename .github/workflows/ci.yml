@@ -9,7 +9,7 @@ name: CI
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     services:
       redis:
@@ -26,21 +26,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             ninja-build \
-            libboost-dev \
             libssl-dev \
-            curl
+            curl \
+            wget \
+            bzip2 \
+            tar
+        env:
+          DEBIAN_FRONTEND: noninteractive
+
+      - name: Build Boost 1.92 (headers only)
+        run: |
+          BOOST_VERSION=1.92.0
+          BOOST_VER_UNDERSCORE=1_92_0
+          cd /tmp
+          wget -q https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VER_UNDERSCORE}.tar.bz2
+          tar xf boost_${BOOST_VER_UNDERSCORE}.tar.bz2
+          cd boost_${BOOST_VER_UNDERSCORE}
+          ./bootstrap.sh --with-libraries=headers --prefix=/usr/local
+          ./b2 headers
+          sudo ./b2 install --prefix=/usr/local
+        env:
+          DEBIAN_FRONTEND: noninteractive
+
+      - name: Verify Boost headers
+        run: |
+          test -f /usr/local/include/boost/redis/src.hpp && echo "OK_REDIS_SRC" || exit 1
+          test -f /usr/local/include/boost/redis/connection.hpp && echo "OK_REDIS_CONN" || exit 1
+          test -f /usr/local/include/boost/version.hpp && cat /usr/local/include/boost/version.hpp | head -1
         env:
           DEBIAN_FRONTEND: noninteractive
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT=/usr/local -DBoost_NO_SYSTEM_PATHS=ON
 
       - name: Build
         run: cmake --build build --parallel
