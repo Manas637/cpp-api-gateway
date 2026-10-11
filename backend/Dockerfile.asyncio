@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim
+
+RUN useradd --system --create-home --uid 10002 backend
+
+WORKDIR /app
+
+COPY backend_asyncio.py /app/backend.py
+
+USER backend
+
+ENTRYPOINT ["python", "/app/backend.py"]

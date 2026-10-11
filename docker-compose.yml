@@ -36,9 +36,10 @@ services:
   backend-a:
     build:
       context: ./backend
-    image: cpp-api-gateway-backend:local
+      dockerfile: Dockerfile.asyncio
+    image: cpp-api-gateway-backend-asyncio:local
     container_name: cpp-api-gateway-backend-a
-    command: ["--host", "0.0.0.0", "--port", "9001", "--name", "backend-a"]
+    command: ["--host", "0.0.0.0", "--port", "9001", "--name", "backend-a", "--mode", "asyncio"]
     healthcheck:
       test:
         - "CMD-SHELL"
@@ -53,9 +54,10 @@ services:
   backend-b:
     build:
       context: ./backend
-    image: cpp-api-gateway-backend:local
+      dockerfile: Dockerfile.asyncio
+    image: cpp-api-gateway-backend-asyncio:local
     container_name: cpp-api-gateway-backend-b
-    command: ["--host", "0.0.0.0", "--port", "9002", "--name", "backend-b"]
+    command: ["--host", "0.0.0.0", "--port", "9002", "--name", "backend-b", "--mode", "asyncio"]
     healthcheck:
       test:
         - "CMD-SHELL"

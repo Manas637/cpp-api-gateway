@@ -1,11 +1,30 @@
+# Build artifacts
 build/
+cmake-build-*/
 .vscode/
 .idea/
+
+# Compiled binaries and objects
 *.exe
 *.dll
 *.o
 *.obj
+*.a
+*.lib
+*.so
+*.pdb
+
+# Environment and secrets
 .env
+.env.*
+!.env.example
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
 
 # Generated Compose files (see scripts/generate_compose.py)
 docker-compose.generated.yml
