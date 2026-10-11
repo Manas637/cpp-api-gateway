@@ -195,8 +195,8 @@ defaults inside the stack.
 | `BACKENDS` | `backends` | `127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003` | comma-separated `host:port` list (at least one entry) |
 | `LOAD_BALANCING_STRATEGY` | `load_balancing_strategy` | `ROUND_ROBIN` | `ROUND_ROBIN`, `LEAST_CONNECTIONS` |
 | `RATE_LIMITING_ENABLED` | `rate_limiting_enabled` | `true` | `true`/`false` (also `1`/`0`) |
-| `RATE_LIMIT_CAPACITY` | `rate_limit_capacity` | `100000` | number (token bucket capacity) |
-| `RATE_LIMIT_REFILL_RATE` | `rate_limit_refill_rate` | `100000` | number (tokens per second) |
+| `RATE_LIMIT_CAPACITY` | `rate_limit_capacity` | `100` | number (token bucket capacity) |
+| `RATE_LIMIT_REFILL_RATE` | `rate_limit_refill_rate` | `10` | number (tokens per second) |
 | `REDIS_HOST` | `redis_host` | `127.0.0.1` | hostname |
 | `REDIS_PORT` | `redis_port` | `6379` | port string |
 | `BACKEND_CONNECT_TIMEOUT_MS` | `backend_connect_timeout` | `2000` | positive integer (ms) |
