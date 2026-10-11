@@ -96,10 +96,10 @@ int main()
             expect(config.rate_limiting_enabled,
                    "Default rate limiting state is incorrect");
 
-            expect(config.rate_limit_capacity == 100000.0,
+            expect(config.rate_limit_capacity == 100.0,
                    "Default rate limit capacity is incorrect");
 
-            expect(config.rate_limit_refill_rate == 100000.0,
+            expect(config.rate_limit_refill_rate == 10.0,
                    "Default rate limit refill rate is incorrect");
 
             expect(config.redis_host == "127.0.0.1",
